@@ -1,5 +1,4 @@
 import sqlite3
-import os
 
 
 def creat_new_cdb(file_path: str) -> sqlite3.Connection:
