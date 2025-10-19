@@ -1,6 +1,7 @@
 import os
 import re
 from CardInfo import Cardinfo
+from DataBase import CDB, Card
 from contextlib import contextmanager
 from PyQt6.QtWidgets import (
     QSizePolicy,
@@ -13,29 +14,283 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QVBoxLayout,
     QLayout,
+    QPlainTextEdit,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
 )
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtGui import QPixmap, QTextCursor, QColor, QPainter, QBrush
+from PyQt6.QtCore import pyqtSignal, Qt, QRect
+
+
+# frame組件
+def new_frame(
+    path: str, parent: QWidget | QLayout, space: int | None = None
+) -> QLayout:
+    if path == "V":
+        frame: QLayout = QVBoxLayout()
+    elif path == "H":
+        frame: QLayout = QHBoxLayout()
+    elif path == "G":
+        frame: QLayout = QGridLayout()
+
+    frame.setContentsMargins(0, 0, 0, 0)  # 去掉多餘邊距
+
+    if space is not None:
+        frame.setSpacing(space)
+
+    if isinstance(parent, QLayout):
+        parent.addLayout(frame)
+    else:  # QWidget
+        parent.setLayout(frame)
+
+    return frame
 
 
 # 新版面容器
-def new_panel(path: str = "V") -> tuple[QWidget, QLayout]:
+def new_panel(path: str = "V", space: int | None = None) -> tuple[QWidget, QLayout]:
     panel: QWidget = QWidget()
-    if path == "V":
-        frame: QLayout = QVBoxLayout(panel)
-    elif path == "H":
-        frame: QLayout = QHBoxLayout(panel)
-    elif path == "G":
-        frame: QLayout = QGridLayout(panel)
-    frame.setContentsMargins(0, 0, 0, 0)  # 去掉多餘邊距
+    frame = new_frame(path, panel, space)
     return [panel, frame]
+
+
+# 标题組件
+def new_title(title: str, frame: QLayout):
+    lab = QLabel(title)
+    lab.setStyleSheet("""
+        background-color: lightgray;
+        color: black;
+        padding: 2px;
+    """)
+    size_policy = lab.sizePolicy()
+    size_policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)  # 禁止垂直拉伸
+    lab.setSizePolicy(size_policy)
+    frame.addWidget(lab)
+
+
+# 不在從空白區按下並拖曳時產生高亮的 QTableWidget 子類
+class CardTable(QTableWidget):
+    def __init__(self, frame: QVBoxLayout):
+        super().__init__()
+        self._press_on_empty = False
+        self._press_index = None
+
+        self.setColumnCount(2)
+        self.setHorizontalHeaderLabels(["ID", "Name"])
+        self.verticalHeader().setVisible(False)
+        self.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.setColumnWidth(0, 80)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)  # 禁編輯
+        self.setSelectionMode(QTableWidget.SelectionMode.NoSelection)  # 禁選中
+        self.setDragDropMode(QTableWidget.DragDropMode.NoDragDrop)  # 禁拖放
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setDragEnabled(False)
+        self.setAcceptDrops(False)
+        self.setStyleSheet("""
+            QTableWidget::item:selected {
+                background-color: transparent;
+                color: black;
+            }
+        """)
+        frame.addWidget(self)
+
+    def mousePressEvent(self, event):
+        idx = self.indexAt(
+            event.position().toPoint() if hasattr(event, "position") else event.pos()
+        )
+        if not idx.isValid():
+            # 點在空白處：記錄並吞掉事件（不傳給父類以避免啟動選取/拖曳）
+            self._press_on_empty = True
+            self._press_index = None
+            # 立即清除任何存在的選取（避免殘留高亮）
+            self.clearSelection()
+            return
+
+        # 點在項目上：記錄索引，保留不啟動拖曳的行為，但允許產生 click
+        self._press_on_empty = False
+        self._press_index = idx
+        # 仍然呼叫父類以確保 click 相關的內部狀態（但我們會在 move 時忽略拖曳）
+        super().mousePressEvent(event)
+
+    # 如果按住的是空白處或是從項目開始，忽略移動事件以避免高亮/選取改變
+    def mouseMoveEvent(self, event):
+        if self._press_on_empty or self._press_index is not None:
+            return
+        super().mouseMoveEvent(event)
+
+    # 如果是從空白處開始按住，釋放時重置狀態並吞掉事件
+    def mouseReleaseEvent(self, event):
+        if self._press_on_empty:
+            self._press_on_empty = False
+            self._press_index = None
+            return
+
+        # 如果是從項目上按下（即使期間有移動），在放開時強制發出 itemClicked 以模擬 click
+        if self._press_index is not None:
+            row = self._press_index.row()
+            col = self._press_index.column()
+            item = self.item(row, col)
+            if item is not None:
+                # 手動發出信號（保持行為一致）
+                try:
+                    self.itemClicked.emit(item)
+                except Exception:
+                    pass
+            # 重置狀態，並且不要呼叫父類以避免造成選取/高亮
+            self._press_index = None
+            return
+
+        super().mouseReleaseEvent(event)
+
+
+# 卡片列表組件
+class CardListSet(QWidget):
+    cdb: CDB | None
+    card_lst: QTableWidget
+    prev_btn: QPushButton
+    page_text: QLineEdit
+    page_label: QLabel
+    next_btn: QPushButton
+    now_ind: int
+
+    def __init__(self):
+        super().__init__()
+        self.now_ind = 0
+        self.cdb: CDB | None = None  # 儲存目前的資料來源
+
+        # 允許接收鍵盤事件
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        main_frame = new_frame("V", self)
+        # 卡片列表
+        self.card_lst = CardTable(main_frame)
+        self.card_lst.itemClicked.connect(self.on_item_clicked)
+        # 按鈕控制區
+        page_frame: QHBoxLayout = new_frame("H", main_frame)
+        self.prev_btn = QPushButton("上一頁")
+        self.page_text = QLineEdit("1")
+        self.page_text.setFixedWidth(40)
+        self.page_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.page_label = QLabel("/ 1")
+        self.next_btn = QPushButton("下一頁")
+        page_frame.addWidget(self.prev_btn)
+        page_frame.addWidget(self.page_text)
+        page_frame.addWidget(self.page_label)
+        page_frame.addWidget(self.next_btn)
+        page_frame.addStretch()
+
+    # 點擊時事件
+    def on_item_clicked(self, item: QTableWidgetItem):
+        row = item.row()
+        id_item = self.card_lst.item(row, 0)
+        pre_id, self.now_ind = self.now_ind, int(id_item.text())
+
+        if pre_id == self.now_ind:
+            return
+
+        # 將該行所有列設置背景色
+        for col in range(self.card_lst.columnCount()):
+            cell = self.card_lst.item(row, col)
+            if cell:
+                cell.setBackground(QColor(180, 200, 255))  # 淺藍色
+                cell.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
+
+        # 可選：將其他行背景重置
+        for r in range(self.card_lst.rowCount()):
+            id_item = self.card_lst.item(r, 0)
+            if id_item and int(id_item.text()) == pre_id:
+                for col in range(self.card_lst.columnCount()):
+                    cell = self.card_lst.item(r, col)
+                    if cell:
+                        cell.setBackground(QBrush())  # 重置為預設背景
+                        cell.setForeground(QBrush())  # 重置為預設字色
+                break
+
+    # 處理上下鍵移動 now_ind 到前一個/下一個
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key.Key_Up:
+            self._move_index(-1)
+            return
+        elif key == Qt.Key.Key_Down:
+            self._move_index(1)
+            return
+        super().keyPressEvent(event)
+
+    def _move_index(self, delta: int):
+        """根據目前 self._cdb 的順序移動 now_ind 並觸發 on_item_clicked。"""
+        if not self.cdb or not self.cdb.cards:
+            return
+
+        keys = list(self.cdb.cards.keys())
+        # 嘗試找到目前 now_ind 的索引
+        try:
+            cur_idx = keys.index(self.now_ind)
+        except ValueError:
+            # 若目前沒有選擇（now_ind 不在列表內），從 -1 開始
+            cur_idx = -1
+
+        new_idx = cur_idx + delta
+        if new_idx < 0 or new_idx >= len(keys):
+            return  # 超出範圍則不動作
+
+        new_id = keys[new_idx]
+
+        # 找到對應的 row，並呼叫 on_item_clicked（模擬點擊）
+        for row, id in enumerate(keys):
+            if id == new_id:
+                item = self.card_lst.item(row, 0)
+                if item is not None:
+                    # 直接呼叫 on_item_clicked，會更新 now_ind 與外觀
+                    self.on_item_clicked(item)
+                    # 讓 CardListSet 保持焦點以持續接收鍵盤事件
+                    self.setFocus()
+                break
+
+    # 更新卡片列表
+    def update(self, cdb: CDB | None = None, ind: int | None = None):
+        # 儲存 cdb 以供鍵盤導覽使用
+        self.cdb = cdb
+
+        self.card_lst.setRowCount(0)
+        self.now_ind = 0 if ind is None else ind
+        if cdb is None:
+            return
+
+        self.card_lst.setRowCount(len(cdb.cards))
+        for row, id in enumerate(cdb.cards.keys()):
+            card = cdb.cards[id]
+            is_selected = card.id == self.now_ind
+            # 更新 ID & Name
+            for col, txt in enumerate([str(card.id), card.name]):
+                item = self.card_lst.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem()
+                    self.card_lst.setItem(row, col, item)
+                item.setText(txt)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                if is_selected:
+                    item.setBackground(QColor(180, 200, 255))  # 淺藍色
+                    item.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
+
+    # 傳回當前卡片
+    def get_now_card(self) -> Card | None:
+        if self.cdb is None or self.now_ind == 0:
+            return None
+        return self.cdb.get_card(self.now_ind)
 
 
 # 卡圖容器
 class ImageSet(QLabel):
+    default_path: str
     clicked = pyqtSignal()
 
-    def __init__(self, frame: QVBoxLayout):
+    def __init__(self, frame: QLayout):
         super().__init__()
         self.setFixedSize(200, 285)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -65,70 +320,74 @@ class ImageSet(QLabel):
         super().mousePressEvent(event)
 
 
-# 輸入組件
+# ID組件
 class IDSet(QWidget):
-    def __init__(self, title: str, frame: QLayout):
+    id: QLineEdit
+    alias: QLineEdit
+
+    def __init__(self, frame: QLayout):
         super().__init__()
+        main_frame: QVBoxLayout = new_frame("V", self)
+        new_title("卡片ID", main_frame)
 
-        # 水平 layout
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        id_panel, id_frame = new_panel("H")
 
-        # 左側 Label
-        self.label = QLabel(title)
-        self.label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        layout.addWidget(self.label)
-
-        # 右側 LineEdit
-        self.text = QLineEdit("0")
-        self.text.setAlignment(
+        # 左側 id
+        self.id = QLineEdit()
+        self.id.setPlaceholderText("ID")
+        self.id.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self.text.setFixedWidth(80)  # 固定寬度
-        layout.addWidget(self.text)
+        id_frame.addWidget(self.id)
 
-        # 讓 LineEdit 拉伸填滿剩餘空間
-        layout.setStretch(0, 0)  # label 不拉伸
-        layout.setStretch(1, 1)  # lineedit 拉伸
+        # 右側 alias
+        self.alias = QLineEdit()
+        self.alias.setPlaceholderText("规则上当作ID")
+        self.alias.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        id_frame.addWidget(self.alias)
 
+        main_frame.addWidget(id_panel)
         frame.addWidget(self)
+
+    # 更新卡片ID
+    def update(self, card: Card):
+        id = card.id
+        alias = card.alias if card.alias != 0 else ""
+        self.id.setText(str(id))
+        self.alias.setText(str(alias))
 
 
 # 下拉框組件
 class ComboboxSet(QWidget):
-    def __init__(
-        self, info: tuple[str, dict[str, str]], default_val: str, frame: QLayout
-    ):
+    combobox: QComboBox
+
+    def __init__(self, info: tuple[str, dict[str, str], str], frame: QLayout):
         super().__init__()
         self.combobox: QComboBox = QComboBox()
 
-        title, key_dict = info
+        title, key_dict, default = info
 
-        # 水平 layout
-        layout: QHBoxLayout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        main_frame: QHBoxLayout = new_frame("H", self)
 
         # 左側 Label
-        label: QLabel = QLabel(title)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(label)
+        lab: QLabel = QLabel(title)
+        lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        main_frame.addWidget(lab)
 
         # 右側 combobox
-        self.combobox.setFixedWidth(80)  # 固定寬度
-        layout.addWidget(self.combobox)
+        # self.combobox.setFixedWidth(80)  # 固定寬度
+        main_frame.addWidget(self.combobox)
         for key, value in key_dict.items():
             self.combobox.addItem(key, value)
-        index = self.combobox.findData(default_val)
+        index = self.combobox.findData(default)
         if index != -1:
             self.combobox.setCurrentIndex(index)
 
         # 讓 LineEdit 拉伸填滿剩餘空間
-        layout.setStretch(0, 0)  # label 不拉伸
-        layout.setStretch(1, 1)  # lineedit 拉伸
+        main_frame.setStretch(0, 0)  # label 不拉伸
+        main_frame.setStretch(1, 1)  # lineedit 拉伸
 
         frame.addWidget(self)
 
@@ -147,57 +406,82 @@ class ComboboxSet(QWidget):
 
 # 卡片类型組件
 class TypeSet(QWidget):
+    main: QComboBox
+    sub: QComboBox
+    sub_data: dict[str, tuple[str, dict[str, str], str]]
+
     def __init__(self, info: Cardinfo, frame: QLayout):
         super().__init__()
+        self.sub_data = {}
+        for key in ["monstyp", "calltyp", "banetyp", "areatyp"]:
+            self.sub_data[key] = info.get_key(key)
 
-        layout: QVBoxLayout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.main_combobox: ComboboxSet = ComboboxSet(
-            info.get_key("typ"), "monstyp", layout
-        )
-        self.sub_combobox: list[ComboboxSet] = []
+        main_frame: QVBoxLayout = new_frame("V", self)
+        new_title("卡片类型", main_frame)
 
-        for magic_str in ["monstyp,0x1", "calltyp,0x2", "banetyp,0x4", "areatyp,0x8"]:
-            key, default = magic_str.split(",")
-            self.sub_combobox.append(ComboboxSet(info.get_key(key), default, layout))
+        typ_panel, typ_frame = new_panel("H")
+
+        # 左側 子类型 QComboBox
+        self.sub = QComboBox()
+        _, key_dict, default = self.sub_data["monstyp"]
+        for key, value in key_dict.items():
+            self.sub.addItem(key, value)
+        index = self.sub.findData(default)
+        if index != -1:
+            self.sub.setCurrentIndex(index)
+        typ_frame.addWidget(self.sub)
+
+        # 右側 类型 QComboBox
+        self.main = QComboBox()
+        _, key_dict, default = info.get_key("typ")
+        for key, value in key_dict.items():
+            self.main.addItem(key, value)
+        index = self.main.findData(default)
+        if index != -1:
+            self.main.setCurrentIndex(index)
+        typ_frame.addWidget(self.main)
+
+        main_frame.addWidget(typ_panel)
+        frame.addWidget(self)
 
         self._update_sub_combobox()
-        self.main_combobox.combobox.currentIndexChanged.connect(
-            self._update_sub_combobox
-        )
+        self.main.currentIndexChanged.connect(self._update_sub_combobox)
 
         frame.addWidget(self)
 
     def _update_sub_combobox(self):
-        show_ind = {
-            "monstyp": 0,
-            "calltyp": 1,
-            "banetyp": 2,
-            "areatyp": 3,
-        }[self.main_combobox.get_value()]
-        for i, combo in enumerate(self.sub_combobox):
-            combo.setVisible(i == show_ind)
+        _, key_dict, default = self.sub_data[self.main.currentData()]
+        self.sub.clear()
+        for key, value in key_dict.items():
+            self.sub.addItem(key, value)
+        index = self.sub.findData(default)
+        if index != -1:
+            self.sub.setCurrentIndex(index)
 
 
 # 字段組件
 class SetNameSet(QWidget):
+    comboboxs: list[QComboBox]
+    lineedits: list[QLineEdit]
+    _updating: bool
+
     def __init__(self, info: tuple[str, dict[str, str]], frame: QLayout):
         super().__init__()
-        self.comboboxs: list[QComboBox] = []
-        self.lineedits: list[QLineEdit] = []
+        self.comboboxs = []
+        self.lineedits = []
         self._updating = False
 
         setname_dict: dict[str, str] = info[1]
         names: list[str] = list(setname_dict.keys())
         values: list[str] = list(setname_dict.values())
 
-        main_layout: QVBoxLayout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(5)
+        main_frame: QVBoxLayout = new_frame("V", self)
+
+        new_title("卡片字段", main_frame)
+
         for _ in range(4):
             # 水平 layout
             row_panel, row_frame = new_panel("H")
-            row_frame.setSpacing(5)
 
             # 左側 combobox 初始化
             combobox = QComboBox()
@@ -219,10 +503,11 @@ class SetNameSet(QWidget):
             lineedit.returnPressed.connect(
                 lambda le=lineedit, cb=combobox: self._lineedit_changed(le, cb)
             )
-            main_layout.addWidget(row_panel)
+            main_frame.addWidget(row_panel)
             self.comboboxs.append(combobox)
             self.lineedits.append(lineedit)
 
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         frame.addWidget(self)
 
     @contextmanager
@@ -288,29 +573,22 @@ class SetNameSet(QWidget):
 
 # 移動標組件
 class MoveSet(QWidget):
+    checkboxes: list[QCheckBox]
+
     def __init__(self, frame: QLayout):
         super().__init__()
-
-        # 水平布局：左側 Label + 右側 3x3 Grid
-        main_frame = QHBoxLayout(self)
-        main_frame.setContentsMargins(0, 0, 0, 0)
-        main_frame.setSpacing(5)
+        main_frame: QHBoxLayout = new_frame("H", self)
 
         # 左側 Label
-        self.label = QLabel("移动/攻击方向")
-        self.label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        main_frame.addWidget(self.label)
+        lab = QLabel("移动/攻击方向")
+        lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        main_frame.addWidget(lab)
 
         # 右側 GridLayout
-        grid_panel, grid_frame = new_panel("G")
-        grid_frame.setSpacing(2)
+        grid_panel, grid_frame = new_panel("G", 2)
 
-        self.checkboxes: list[QCheckBox] = []
-
+        self.checkboxes = []
         positions = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1), (2, 2)]
-
         for i, pos in enumerate(positions):
             cb = QCheckBox()
             self.checkboxes.append(cb)
@@ -322,56 +600,140 @@ class MoveSet(QWidget):
         frame.addWidget(self)
 
 
-# 脚本提示列
-class HintTextSet(QWidget):
-    def __init__(self, title: str, frame: QLayout):
+class HintSetTextArea(QPlainTextEdit):
+    def __init__(self):
         super().__init__()
+        # 禁止自動換行
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # 設定字體
+        font = self.font()
+        font.setFamily("Consolas")
+        font.setPointSize(10)
+        self.setFont(font)
+        # 開始打字的位置
+        self.setViewportMargins(17, 0, 0, 0)
+        # 繪製行號欄
+        cr = self.contentsRect()
+        HintSetLineArea(self).setGeometry(QRect(cr.left(), cr.top(), 17, cr.height()))
+        # 預設內容
+        self.setPlainText("\n" * 15)
 
-        # 水平 layout
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
 
-        # 左側 LineEdit
-        self.text = QLineEdit("")
-        self.text.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        layout.addWidget(self.text)
+class HintSetLineArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
 
-        # 右側 Label
-        label = QLabel(title)
-        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        label.setFixedWidth(15)  # 固定寬度
-        layout.addWidget(label)
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        top, offset = 4, 15
+        for i in range(16):
+            painter.drawText(
+                0,
+                top,
+                self.width() - 1,
+                15,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                str(i),
+            )
+            top += offset
 
-        # 讓 LineEdit 拉伸填滿剩餘空間
-        layout.setStretch(0, 0)  # label 不拉伸
-        layout.setStretch(1, 1)  # lineedit 拉伸
-
-        frame.addWidget(self)
+        # 分隔線
+        painter.setPen(QColor(180, 180, 180))
+        painter.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
 
 
 # 脚本提示組件
 class HintSet(QWidget):
+    hint: HintSetTextArea
+
     def __init__(self, frame: QLayout):
         super().__init__()
-        self.lineedits: list[HintTextSet] = []
+        self.hint = HintSetTextArea()
 
-        main_frame = QVBoxLayout(self)
-        main_frame.setContentsMargins(0, 0, 0, 0)
-        main_frame.setSpacing(5)
+        main_frame: QVBoxLayout = new_frame("V", self)
 
-        title = QLabel("脚本提示文字")
-        title.setStyleSheet("""
-            background-color: lightgray;
-            color: black;
-            padding: 2px;
-        """)
-        main_frame.addWidget(title)
+        new_title("脚本提示文字", main_frame)
 
-        for i in range(16):
-            le: HintTextSet = HintTextSet(f"{i}",  main_frame)
-            self.lineedits.append(le)
+        # 脚本提示
+        self.hint.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        main_frame.addWidget(self.hint)
+
+        # 禁用滾動條
+        self.hint.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # 監聽文字變動
+        self.hint.textChanged.connect(self._on_text_changed)
 
         frame.addWidget(self)
+
+    def _on_text_changed(self):
+        cursor = self.hint.textCursor()
+        block_num = cursor.blockNumber()  # 行號
+        col = cursor.positionInBlock()  # 列號
+
+        text = self.hint.toPlainText()
+        lines = text.splitlines()
+
+        if len(lines) < 16:
+            lines += [""] * (16 - len(lines))
+        elif len(lines) > 16:
+            lines = lines[:16]
+
+        corrected = "\n".join(lines)
+
+        if corrected != text:
+            self.hint.blockSignals(True)
+            self.hint.setPlainText(corrected)
+            # 恢復光標到原行列
+            new_cursor = self.hint.textCursor()
+            new_cursor.movePosition(QTextCursor.MoveOperation.Start)
+            new_cursor.movePosition(
+                QTextCursor.MoveOperation.Down,
+                QTextCursor.MoveMode.MoveAnchor,
+                block_num,
+            )
+            new_cursor.movePosition(
+                QTextCursor.MoveOperation.Right,
+                QTextCursor.MoveMode.MoveAnchor,
+                col,
+            )
+            self.hint.setTextCursor(new_cursor)
+            self.hint.blockSignals(False)
+
+
+# 卡片資料組件
+class CardDataSet(QWidget):
+    code: IDSet
+    setname: SetNameSet
+    typ: TypeSet
+    life: ComboboxSet
+    atk: ComboboxSet
+    cost: ComboboxSet
+    from_: ComboboxSet
+    race: ComboboxSet
+    moveset: MoveSet
+
+    def __init__(self, cardinfo: Cardinfo, frame: QLayout):
+        super().__init__()
+        # id & alias
+        self.code = IDSet(frame)
+        # 字段
+        self.setname = SetNameSet(cardinfo.get_key("setname"), frame)
+        # 卡片类型
+        self.typ = TypeSet(cardinfo, frame)
+        new_title("卡片细节", frame)
+        # 生命
+        self.life: ComboboxSet = ComboboxSet(cardinfo.get_key("life"), frame)
+        # 攻擊力 & 費用 & 陣營 & 種族
+        self.atk: ComboboxSet = ComboboxSet(cardinfo.get_key("atk"), frame)
+        self.cost: ComboboxSet = ComboboxSet(cardinfo.get_key("cost"), frame)
+        self.from_: ComboboxSet = ComboboxSet(cardinfo.get_key("from"), frame)
+        self.race: ComboboxSet = ComboboxSet(cardinfo.get_key("race"), frame)
+        # 移動箭頭
+        self.moveset: MoveSet = MoveSet(frame)
+
+    # 更新卡片資料
+    def update(self, card: Card):
+        self.code.update(card)

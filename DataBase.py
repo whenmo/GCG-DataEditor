@@ -53,6 +53,19 @@ def creat_new_cdb(file_path: str) -> sqlite3.Connection:
 
 
 class Card:
+    id: int
+    alias: int
+    setcode: int
+    type: int
+    value: int
+    atk: int
+    move: int
+    race: int
+    from_: int
+    name: str
+    desc: str
+    hints: list[str]
+
     def __init__(self):
         pass
 
@@ -74,12 +87,15 @@ class Card:
 
 
 class CDB:
+    path: str
+    cards: dict[int, Card]
+
     def __init__(self, path: str, cursor: sqlite3.Cursor):
-        self.path: str = path
-        self.cards: dict[int, Card] = {}
+        self.path = path
+        self.cards = {}
 
         cursor.execute("SELECT * FROM datas")
-        datas = cursor.fetchall()  # 所有資料
+        datas = cursor.fetchall()
         cursor.execute("SELECT * FROM texts")
         texts = cursor.fetchall()
 
@@ -90,8 +106,23 @@ class CDB:
             card.Set_Text(text)
             self.cards[data[0]] = card
 
+    def get_first_id(self) -> int:
+        if not self.cards:
+            return 0
+        return next(iter(self.cards))
 
-def Load_Cdb(cdb_path: str) -> CDB | None:
+    # 回傳指定 id 的 Card 輸入可為 int/str/None 找不到對應 id 也回傳 None
+    def get_card(self, id: int | str | None) -> Card | None:
+        if not id:
+            return None
+        try:
+            key = int(id)
+        except (TypeError, ValueError):
+            return None
+        return self.cards.get(key)
+
+
+def load_cdb(cdb_path: str) -> CDB | None:
     """加載 cdb 文件中的數據"""
     try:
         with sqlite3.connect(cdb_path) as cdb:
