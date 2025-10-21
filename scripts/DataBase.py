@@ -1,15 +1,6 @@
 import sqlite3
 
-
-def creat_new_cdb(file_path: str) -> sqlite3.Connection:
-    """
-    建立新的 CDB 資料庫檔案，包含 datas 與 texts 兩個表
-    """
-    conn = sqlite3.connect(file_path)
-    cursor = conn.cursor()
-
-    # 建立 datas 表
-    cursor.execute("""
+DATAS_SQL_SET: str = """
     CREATE TABLE IF NOT EXISTS datas (
         id INTEGER PRIMARY KEY,
         alias INTEGER,
@@ -21,10 +12,9 @@ def creat_new_cdb(file_path: str) -> sqlite3.Connection:
         race INTEGER,
         [from] INTEGER
     )
-    """)
+    """
 
-    # 建立 texts 表
-    cursor.execute("""
+TEXTS_SQL_SET: str = """
     CREATE TABLE IF NOT EXISTS texts (
         id INTEGER PRIMARY KEY,
         name TEXT,
@@ -46,10 +36,18 @@ def creat_new_cdb(file_path: str) -> sqlite3.Connection:
         hint15 TEXT,
         hint16 TEXT
     )
-    """)
+    """
 
+
+# 建立新的 CDB 資料庫檔案，包含 datas 與 texts 兩個表
+def creat_new_cdb(file_path: str):
+    conn = sqlite3.connect(file_path)
+    cursor = conn.cursor()
+    # 建立 data & texts 表
+    cursor.execute(DATAS_SQL_SET)
+    cursor.execute(TEXTS_SQL_SET)
     conn.commit()
-    return conn
+    conn.close()
 
 
 class Card:
@@ -66,45 +64,62 @@ class Card:
     desc: str
     hints: list[str]
 
-    def __init__(self):
-        pass
+    def __init__(self, id: int):
+        self.id = id
+        self.alias = 0
+        self.setcode = 0
+        self.type = 0
+        self.value = 0
+        self.atk = 0
+        self.move = 0
+        self.race = 0
+        self.from_ = 0
+        self.name = ""
+        self.desc = ""
+        self.hints = []
 
-    def Set_Data(self, data: list[int]):
-        self.id: int = data[0]
-        self.alias: int = data[1]
-        self.setcode: int = data[2]
-        self.type: int = data[3]
-        self.value: int = data[4]
-        self.atk: int = data[5]
-        self.move: int = data[6]
-        self.race: int = data[7]
-        self.from_: int = data[8]
+    def set_id(self, id: int):
+        self.id = id
 
-    def Set_Text(self, text: list[str]):
-        self.name: str = text[1]
-        self.desc: str = text[2]
-        self.hints: list[str] = text[3:]
+    def set_data(self, data: list[int]):
+        self.alias = data[1]
+        self.setcode = data[2]
+        self.type = data[3]
+        self.value = data[4]
+        self.atk = data[5]
+        self.move = data[6]
+        self.race = data[7]
+        self.from_ = data[8]
+
+    def set_text(self, text: list[str]):
+        self.name = text[1]
+        self.desc = text[2]
+        self.hints = text[3:]
 
 
 class CDB:
     path: str
     cards: dict[int, Card]
 
-    def __init__(self, path: str, cursor: sqlite3.Cursor):
+    def __init__(self, path: str):
         self.path = path
         self.cards = {}
+        try:
+            with sqlite3.connect(self.path) as conn:
+                cursor = conn.cursor()
+            cursor.execute("SELECT * FROM datas")
+            datas = cursor.fetchall()
+            cursor.execute("SELECT * FROM texts")
+            texts = cursor.fetchall()
 
-        cursor.execute("SELECT * FROM datas")
-        datas = cursor.fetchall()
-        cursor.execute("SELECT * FROM texts")
-        texts = cursor.fetchall()
-
-        self.index: int = datas[0][0] if datas else 0
-        for data, text in zip(datas, texts):
-            card = Card()
-            card.Set_Data(data)
-            card.Set_Text(text)
-            self.cards[data[0]] = card
+            self.index: int = datas[0][0] if datas else 0
+            for data, text in zip(datas, texts):
+                card = Card(data[0])
+                card.set_data(data)
+                card.set_text(text)
+                self.cards[data[0]] = card
+        except Exception:
+            return None
 
     def get_first_id(self) -> int:
         if not self.cards:
@@ -121,14 +136,56 @@ class CDB:
             return None
         return self.cards.get(key)
 
+    def has_id(self, id: int) -> bool:
+        if id in self.cards:
+            return True
+        return False
 
-def load_cdb(cdb_path: str) -> CDB | None:
-    """加載 cdb 文件中的數據"""
-    try:
-        with sqlite3.connect(cdb_path) as cdb:
-            cdb_cursor = cdb.cursor()
-            cdb_data = CDB(cdb_path, cdb_cursor)
-            return cdb_data
-    except Exception as e:
-        print(e)
-        return None
+    def add_card(self, c: Card):
+        self.cards[c.id] = c
+
+    def save(self):
+        conn = sqlite3.connect(self.path)
+        try:
+            cur = conn.cursor()
+            # ensure tables exist (schema from creat_new_cdb)
+            cur.execute(DATAS_SQL_SET)
+            cur.execute(TEXTS_SQL_SET)
+            # clear existing data
+            cur.execute("DELETE FROM datas")
+            cur.execute("DELETE FROM texts")
+            # insert rows from self.cards
+            for cid, card in self.cards.items():
+                # datas: id, alias, setcode, type, value, atk, move, race, from
+                data_row = (
+                    int(card.id),
+                    int(card.alias),
+                    int(card.setcode),
+                    int(card.type),
+                    int(card.value),
+                    int(card.atk),
+                    int(card.move),
+                    int(card.race),
+                    int(card.from_),
+                )
+                cur.execute(
+                    "INSERT INTO datas VALUES (?,?,?,?,?,?,?,?,?)",
+                    data_row,
+                )
+
+                # texts: id, name, desc, hint1..hint16
+                hints = list(card.hints) if card.hints else []
+                # ensure 16 hints
+                if len(hints) < 16:
+                    hints += [""] * (16 - len(hints))
+                else:
+                    hints = hints[:16]
+                text_row = (int(card.id), card.name or "", card.desc or "", *hints)
+                cur.execute(
+                    "INSERT INTO texts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    text_row,
+                )
+
+            conn.commit()
+        finally:
+            conn.close()

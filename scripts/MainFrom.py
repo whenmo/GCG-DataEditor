@@ -1,12 +1,10 @@
-import os
 import sys
-from DataBase import CDB, load_cdb, creat_new_cdb
+from DataBase import creat_new_cdb
 from DataEditorFrom import DataEditor
+from ItemLib import FileBtnToolBar
 from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
-    QWidget,
-    QPushButton,
     QFileDialog,
     QToolBar,
     QToolButton,
@@ -17,12 +15,14 @@ from PyQt6.QtCore import Qt
 
 
 class MainWindow(QMainWindow):
-    cdb_list: QToolBar
+    file_list: FileBtnToolBar
     dataeditor: DataEditor
+    title: str
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Eternal Field DataEditor")
+        self.title = "Eternal Field DataEditor"
+        self.setWindowTitle(self.title)
         self.resize(850, 650)
 
         # 工具列
@@ -48,30 +48,25 @@ class MainWindow(QMainWindow):
         file_menu.addAction(newfile_act)
         newfile_act.triggered.connect(self.new_cdb)
 
-        savefile_act = QAction("保存", self)
-        file_menu.addAction(savefile_act)
-        savefile_act.triggered.connect(lambda: print("保存被點擊"))
-
-        # ---------------- cdb 列表 ----------------
+        # ---------------- 檔案列表 ----------------
         self.addToolBarBreak()  # 讓下一個工具列換行，放在主工具列下方
-        self.cdb_list = QToolBar("cdb_list")
-        self.cdb_list.setFixedHeight(30)  # 固定高度 50px
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.cdb_list)
+        self.file_list = FileBtnToolBar(self)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.file_list)
 
         # ---------------- 數據編輯器 ----------------
-        self.dataeditor = DataEditor()
+        self.dataeditor = DataEditor(self)
         self.setCentralWidget(self.dataeditor)
 
-    # --- 開啟資料庫檔案 ---
+    # 開啟 cdb
     def open_cdb(self, path=None):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open CDB File", "", "CDB Files (*.cdb);;All Files (*)"
+            self, "Open CDB File", "", "CDB Files (*.cdb)"
         )
         if not path:
             return
-        CdbFileBtn(path, self)
+        self.file_list.add_cdbfile(path)
 
-    # --- 新建資料庫檔案 ---
+    # 新建 cdb
     def new_cdb(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "New CDB File", "", "CDB Files (*.cdb)"
@@ -80,58 +75,10 @@ class MainWindow(QMainWindow):
             return
         creat_new_cdb(path)
         # 建立 FileButtonWidget
-        CdbFileBtn(path, self)
-
-
-# 檔案分頁按鈕
-class CdbFileBtn(QWidget):
-    filepath: str
-    main: MainWindow
-    fileBtn: QPushButton
-    closeBtn: QPushButton
-    action: QAction
-    cdb: CDB
-    now_ind: int
-
-    def __init__(self, filepath: str, main: MainWindow):
-        super().__init__()
-        self.filepath = filepath
-        self.main = main
-        self.setFixedSize(100, 30)  # 容器大小
-
-        # 檔案按鈕
-        self.fileBtn = QPushButton(os.path.basename(self.filepath), self)
-        self.fileBtn.setGeometry(0, 0, 100, 30)
-        self.fileBtn.setStyleSheet("text-align: left; padding-left: 5px;")
-        self.fileBtn.clicked.connect(self.load_file)
-
-        # X 按鈕疊加在右上角
-        self.closeBtn = QPushButton("X", self)
-        self.closeBtn.setGeometry(75, 5, 20, 20)
-        self.closeBtn.clicked.connect(self.remove_self)
-
-        # 將 widget 加到工具列
-        self.action = self.main.cdb_list.addWidget(self)
-
-        self.cdb = load_cdb(self.filepath)
-        self.now_ind = self.cdb.get_first_id()
-        self.main.dataeditor.set_cdb(self.cdb, self.now_ind)
-
-    def load_file(self):
-        self.main.dataeditor.set_cdb(self.cdb, self.now_ind)
-
-    def remove_self(self):
-        self.main.dataeditor.set_cdb()
-        self.main.cdb_list.removeAction(self.action)
-        self.deleteLater()
-
-
-def main():
-    app = QApplication(sys.argv)
-    w = MainWindow()
-    w.show()
-    sys.exit(app.exec())
+        self.file_list.add_cdbfile(path)
 
 
 if __name__ == "__main__":
-    main()
+    app = QApplication(sys.argv)
+    MainWindow().show()
+    sys.exit(app.exec())

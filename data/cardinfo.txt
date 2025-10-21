@@ -19,7 +19,8 @@ areatyp	领域卡
 0x84	反击
 @areatyp	领域卡子类型	0x8
 0x8	子类型 N/A
-@life	生命	5
+@life	生命	0
+0	N/A
 5	~40
 @atk	ATK	0
 -2	?
@@ -62,6 +63,7 @@ areatyp	领域卡
 0x800000	幻龙
 0x1000000	电子界
 @setname	字段	0x0
+-1	自定义
 0x0	字段 N/A
 0x1	正义盟军
 0x2	次世代
