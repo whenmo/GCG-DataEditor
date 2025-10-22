@@ -1,6 +1,6 @@
 import os
 import re
-from CardInfo import Cardinfo
+from CardInfo import Cardinfo, load_cardinfo
 from DataBase import CDB, Card
 from contextlib import contextmanager
 from PyQt6.QtWidgets import (
@@ -20,21 +20,16 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QPushButton,
     QFileDialog,
-    QMessageBox,
 )
 import shutil
 from PyQt6.QtGui import QPixmap, QTextCursor, QColor, QPainter, QBrush, QAction
-from PyQt6.QtCore import pyqtSignal, Qt, QRect
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from MainFrom import MainWindow
+from PyQt6.QtCore import pyqtSignal, Qt, QRect, QTimer
+from Global import get_main
 
 
 # ---------- MainWindow item ----------
 # 檔案分頁按鈕
 class CdbFileBtn(QWidget):
-    main: "MainWindow"
     filepath: str
     fileBtn: QPushButton
     closeBtn: QPushButton
@@ -44,10 +39,9 @@ class CdbFileBtn(QWidget):
     style_select: str
     style_unselect: str
 
-    def __init__(self, filepath: str, main: "MainWindow"):
+    def __init__(self, filepath: str):
         super().__init__()
         self.filepath = filepath
-        self.main = main
         self.style_select = "text-align: left; padding-left: 5px; background-color: rgb(180,200,255); color: black;"
         self.style_unselect = "text-align: left; padding-left: 5px;"
 
@@ -63,42 +57,65 @@ class CdbFileBtn(QWidget):
 
         self.select()
         self.setFixedSize(100, 30)  # 容器大小
-        self.main.dataeditor.setVisible(True)
+        # 延遲訪問 get_main()，避免在 widget 初始化流程中因載入順序造成 MAIN 為 None
+        QTimer.singleShot(0, self._ensure_main_visible)
 
     # 載入 cdb
     def set_cdb(self):
         self.cdb = CDB(self.filepath)
         self.card_index = self.cdb.get_first_id()
-        self.main.dataeditor.set_cdb(self.cdb, self.card_index)
+        main = get_main()
+        if main:
+            main.dataeditor.set_cdb(self.cdb, self.card_index)
+        else:
+            QTimer.singleShot(0, self._delayed_set_cdb)
+
+    def _ensure_main_visible(self):
+        main = get_main()
+        if main:
+            main.dataeditor.setVisible(True)
+
+    def _delayed_set_cdb(self):
+        main = get_main()
+        if main:
+            main.dataeditor.set_cdb(self.cdb, self.card_index)
 
     def set_action(self, action: QAction):
         self.act = action
 
     def on_clicked(self):
         """被點擊時：載入檔案並在 toolbar 中設為選中項。"""
+        main = get_main()
+        if main is None:
+            return
+        editor = main.dataeditor
         # 載入資料編輯器
-        self.main.dataeditor.set_cdb(self.cdb, self.card_index)
-        self.main.dataeditor.setVisible(True)
+        editor.set_cdb(self.cdb, self.card_index)
+        editor.setVisible(True)
         # 設定 toolbar 選中
         try:
-            tb: FileBtnToolBar = self.main.file_list
+            tb: FileBtnToolBar = main.file_list
             idx = tb.file_list.index(self)
             tb.set_selected_index(idx)
         except Exception:
             pass
 
     def load_file(self):
-        self.main.dataeditor.set_cdb(self.cdb, self.card_index)
+        main = get_main()
+        if main:
+            main.dataeditor.set_cdb(self.cdb, self.card_index)
 
     def remove_self(self):
-        self.main.dataeditor.set_cdb()
+        main = get_main()
+        if main:
+            main.dataeditor.set_cdb()
         # 通知 toolbar 移除此 action
         try:
-            self.main.file_list.remove_action(self.act)
+            main.file_list.remove_action(self.act)
         except Exception:
             # fallback
             try:
-                self.main.file_list.removeAction(self.act)
+                main.file_list.removeAction(self.act)
             except Exception:
                 pass
         self.deleteLater()
@@ -107,25 +124,27 @@ class CdbFileBtn(QWidget):
         """將自己標為選中狀態（淺藍底、黑字）。"""
         self.fileBtn.setStyleSheet(self.style_select)
         self.closeBtn.setStyleSheet(self.style_select)
-        self.main.setWindowTitle(self.filepath)
+        main = get_main()
+        if main:
+            main.setWindowTitle(self.filepath)
 
     def deselect(self):
         """恢復預設樣式。"""
+        main = get_main()
         self.fileBtn.setStyleSheet(self.style_unselect)
         self.closeBtn.setStyleSheet(self.style_unselect)
-        self.main.setWindowTitle(self.main.title)
+        if main:
+            main.setWindowTitle(main.title)
 
 
 # 檔案分頁列表
 class FileBtnToolBar(QToolBar):
-    main: "MainWindow"
     index: int
     count: int
     file_list: list[CdbFileBtn]
 
-    def __init__(self, main: "MainWindow"):
+    def __init__(self):
         super().__init__("file_list")
-        self.main = main
         self.setFixedHeight(30)
         self.index = -1
         self.count = 0
@@ -140,7 +159,7 @@ class FileBtnToolBar(QToolBar):
             and os.path.exists(filepath)
             and filepath.lower().endswith(".cdb")
         ):
-            QMessageBox.warning(self.main, "檔案不存在", f"路径无效{filepath}")
+            get_main().show_error(f"路径无效 {filepath}")
             return
         # 已存在相同路徑的分頁則指向該分頁
         for i, f in enumerate(self.file_list):
@@ -152,7 +171,7 @@ class FileBtnToolBar(QToolBar):
         if self.index != -1:
             self.file_list[self.index].deselect()
 
-        cdb_file: CdbFileBtn = CdbFileBtn(filepath, self.main)
+        cdb_file: CdbFileBtn = CdbFileBtn(filepath)
         self.index = self.count
         self.count += 1
         self.file_list.append(cdb_file)
@@ -214,7 +233,7 @@ class FileBtnToolBar(QToolBar):
                 pass
         # 若沒有項目，隱藏 dataeditor
         if self.count == 0:
-            self.main.dataeditor.setVisible(False)
+            get_main().dataeditor.setVisible(False)
 
     def set_selected_index(self, idx: int):
         """設定 toolbar 的選中項（會處理樣式與 index 更新）。"""
@@ -404,6 +423,13 @@ class ImageSet(QLabel):
             )
             self.setPixmap(scaled_pixmap)
 
+    # 讀取卡片並更新卡片文本
+    def load_card(self, card: Card):
+        # 以 cdb 檔案所在目錄為基底，載入 pics/c<id>.jpg
+        img_dir = os.path.dirname(get_main().file_list.get_file_btn().cdb.path)
+        img_path = os.path.join(img_dir, "pics", f"c{int(card.id)}.jpg")
+        self.set_image(img_path)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
@@ -448,12 +474,17 @@ class IDSet(QWidget):
         self.id.setText(str(id))
         self.alias.setText(str(alias))
 
+    # 清空當前內容
+    def clear(self):
+        self.id.setText("")
+        self.alias.setText("")
+
     # 獲取 id 與 同名卡
     def get_code(self):
         id = self.id.text() or "0"
         if not re.fullmatch(r"[0-9]+", id):
             id = "0"
-        alias = self.id.text() or "0"
+        alias = self.alias.text() or "0"
         if not re.fullmatch(r"[0-9]+", alias):
             alias = "0"
         if id == alias and alias != "0":
@@ -560,6 +591,10 @@ class TypeSet(QWidget):
         if index != -1:
             self.sub.setCurrentIndex(index)
 
+    def celear(self):
+        self.main.setCurrentIndex(self.main.findData("monstyp"))
+        self.sub.setCurrentIndex(self.sub.findData("0x1"))
+
     # 根據 card 設定卡片ID
     def load_card(self, card: Card):
         typ = card.type
@@ -569,8 +604,9 @@ class TypeSet(QWidget):
             0x4: "banetyp",
             0x8: "areatyp",
         }[typ & 0xF]
-        # sub_typ = typ & 0xFF0
         self.main.setCurrentIndex(self.main.findData(main_typ))
+        sub_typ = f"0x{typ:X}"
+        self.sub.setCurrentIndex(self.sub.findData(sub_typ))
 
     def get_type(self) -> int:
         return int(self.sub.currentData(), 16)
@@ -589,49 +625,42 @@ class SetNameSet(QWidget):
         self._updating = False
 
         setname_dict: dict[str, str] = info[1]
-        names: list[str] = list(setname_dict.keys())
-        values: list[str] = list(setname_dict.values())
+        names: list[str] = setname_dict.keys()
+        values: list[str] = setname_dict.values()
 
         main_frame: QVBoxLayout = new_frame("V", self)
-
         new_title("卡片字段", main_frame)
-
         for _ in range(4):
             # 水平 layout
             row_panel, row_frame = new_panel("H")
-
             # 左側 combobox 初始化
-            combobox = QComboBox()
-            row_frame.addWidget(combobox)
+            set_cb = QComboBox()
+            row_frame.addWidget(set_cb)
             for setname, value in zip(names, values):
-                combobox.addItem(setname, value)
-
+                set_cb.addItem(setname, value.upper())
             # 右側 LineEdit
-            lineedit = QLineEdit("0")
-            lineedit.setAlignment(
+            set_le = QLineEdit("0")
+            set_le.setAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            lineedit.setFixedWidth(80)  # 固定寬度
-            row_frame.addWidget(lineedit)
+            set_le.setFixedWidth(80)  # 固定寬度
+            row_frame.addWidget(set_le)
 
-            combobox.currentIndexChanged.connect(
-                lambda idx, le=lineedit, cb=combobox: self._combobox_changed(cb, le)
+            set_cb.currentIndexChanged.connect(
+                lambda idx, le=set_le, cb=set_cb: self._combobox_changed(cb, le)
             )
-            lineedit.returnPressed.connect(
-                lambda le=lineedit, cb=combobox: self._lineedit_changed(le, cb)
+            set_le.textChanged.connect(
+                lambda text, le=set_le, cb=set_cb: self._lineedit_changed(le, cb)
             )
             main_frame.addWidget(row_panel)
-            self.comboboxs.append(combobox)
-            self.lineedits.append(lineedit)
+            self.comboboxs.append(set_cb)
+            self.lineedits.append(set_le)
 
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         frame.addWidget(self)
 
     @contextmanager
     def updating_block(self):
-        if self._updating:
-            yield
-            return
         self._updating = True
         try:
             yield
@@ -639,36 +668,47 @@ class SetNameSet(QWidget):
             self._updating = False
 
     def _combobox_changed(self, combobox: QComboBox, lineedit: QLineEdit):
+        if self._updating:
+            return
         with self.updating_block():
-            value: str = combobox.currentData()
-            lineedit.setText(value[2:].lower())
+            val_str: str = str(combobox.currentData())
+            if val_str == "-1" or val_str == "None":
+                val_str = "FFFF"
+            else:
+                val_str = val_str[2:].upper()
+            lineedit.setText(val_str)
 
     def _lineedit_changed(self, lineedit: QLineEdit, combobox: QComboBox):
+        if self._updating:
+            return
         with self.updating_block():
-            ind, txt = self.get_key_val(lineedit.text())
-            lineedit.setText(txt)
+            ind, _ = self.get_key_val(lineedit.text())
             combobox.setCurrentIndex(ind)
 
     def get_setname(self) -> int:
         """get the sum of setname"""
-        return sum([int(lineedit.text() or "0") for lineedit in self.lineedits])
+        res = 0
+        for i, lineedit in enumerate(self.lineedits):
+            val_str = (lineedit.text() or "0").upper()
+            if re.fullmatch(r"[0-9A-F]+", val_str):
+                res += int(val_str, 16) << (i * 16)
+        return res
 
     # 獲取字段值對應的 combobox 索引與標準化十六進制字串
     def get_key_val(self, val: str | int) -> tuple[int, str]:
         val_str: str = "0"
         if isinstance(val, int):
-            val_str = f"{val:x}"
+            val_str = f"{val:X}"
         elif isinstance(val, str):
-            val_str = val.lower()
-            if val_str.startswith("0x"):
+            val_str = val.upper()
+            if val_str.startswith("0X"):
                 val_str = val_str[2:]
-            if len(val_str) > 4 or not re.fullmatch(r"[0-9a-f]+", val_str):
+            if len(val_str) > 4 or not re.fullmatch(r"[0-9A-F]+", val_str):
                 val_str = "0"
-
-        index = self.comboboxs[0].findData("0x" + val_str)
+        # 沒有則為 -1 (自定義
+        index = self.comboboxs[0].findData("0X" + val_str)
         if index == -1:
             index = self.comboboxs[0].findData("-1")
-
         return (index, val_str)
 
     # 設定單個字段組件
@@ -685,7 +725,6 @@ class SetNameSet(QWidget):
                 val = setcode & 0xFFFF
                 vals_str[i] = f"{val:X}"
                 setcode >>= 16
-
         for i in range(4):
             self.set_unit(i, vals_str[i])
 
@@ -728,6 +767,16 @@ class MoveSet(QWidget):
             if cb.isChecked():
                 value |= 1 << i
         return value
+
+    def clear(self):
+        for _, cb in enumerate(self.checkboxes):
+            cb.setChecked(False)
+
+    # 讀取卡片並更新卡片資料
+    def load_card(self, card: Card):
+        move = card.move
+        for i, cb in enumerate(self.checkboxes):
+            cb.setChecked((move & (1 << i)) != 0)
 
 
 class HintSetTextArea(QPlainTextEdit):
@@ -779,20 +828,15 @@ class HintSet(QWidget):
     def __init__(self, frame: QLayout):
         super().__init__()
         self.hint = HintSetTextArea()
-
         main_frame: QVBoxLayout = new_frame("V", self)
-
         new_title("脚本提示文字", main_frame)
-
         # 脚本提示
         self.hint.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         main_frame.addWidget(self.hint)
-
         # 禁用滾動條
         self.hint.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
         # 監聽文字變動
         self.hint.textChanged.connect(self._on_text_changed)
 
@@ -837,6 +881,12 @@ class HintSet(QWidget):
         lines = text.splitlines()
         return lines[:16]
 
+    def clear(self):
+        self.hint.setPlainText("\n" * 15)
+
+    def load_card(self, card: Card):
+        self.hint.setPlainText("\n".join(card.hints))
+
 
 # ---------- DataEditor item ----------
 # 卡片列表組件
@@ -848,11 +898,12 @@ class CardListSet(QWidget):
     page_label: QLabel
     next_btn: QPushButton
     id_index: int
+    id_to_row: dict[int, int]
 
     def __init__(self):
         super().__init__()
         self.id_index = 0
-        self.cdb: CDB | None = None  # 儲存目前的資料來源
+        self.id_to_row = {}
 
         # 允許接收鍵盤事件
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -875,6 +926,7 @@ class CardListSet(QWidget):
         page_frame.addWidget(self.next_btn)
         page_frame.addStretch()
 
+    # ---------------- 內部事件 ----------------
     # 點擊時事件
     def on_item_clicked(self, item: QTableWidgetItem):
         row = item.row()
@@ -892,15 +944,15 @@ class CardListSet(QWidget):
                 cell.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
 
         # 可選：將其他行背景重置
-        for r in range(self.card_lst.rowCount()):
-            id_item = self.card_lst.item(r, 0)
-            if id_item and int(id_item.text()) == pre_id:
-                for col in range(self.card_lst.columnCount()):
-                    cell = self.card_lst.item(r, col)
-                    if cell:
-                        cell.setBackground(QBrush())  # 重置為預設背景
-                        cell.setForeground(QBrush())  # 重置為預設字色
-                break
+        prev_row = self.id_to_row.get(pre_id)
+        if prev_row is not None and 0 <= prev_row < self.card_lst.rowCount():
+            for col in range(self.card_lst.columnCount()):
+                cell = self.card_lst.item(prev_row, col)
+                if cell:
+                    cell.setBackground(QBrush())  # 重置為預設背景
+                    cell.setForeground(QBrush())  # 重置為預設字色
+
+        get_main().dataeditor.updata()
 
     # 處理上下鍵移動 now_ind 到前一個/下一個
     def keyPressEvent(self, event):
@@ -943,6 +995,7 @@ class CardListSet(QWidget):
                     self.setFocus()
                 break
 
+    # ---------------- 設定數據 ----------------
     # 更新卡片列表
     def update(self, cdb: CDB | None = None, ind: int | None = None):
         # 儲存 cdb 以供鍵盤導覽使用
@@ -953,9 +1006,21 @@ class CardListSet(QWidget):
         if cdb is None:
             return
 
-        self.card_lst.setRowCount(len(cdb.cards))
-        for row, id in enumerate(cdb.cards.keys()):
+        # 使用數值排序的 keys（根據 card id 的大小），以確保表格按 ID 大小顯示
+        try:
+            keys = sorted(cdb.cards.keys(), key=lambda k: int(k))
+        except Exception:
+            # 若 key 不是可轉為 int，退回到原始順序
+            keys = list(cdb.cards.keys())
+
+        self.card_lst.setRowCount(len(keys))
+        for row, id in enumerate(keys):
             card = cdb.cards[id]
+            # 存儲 id -> row 映射以便快速查找
+            try:
+                self.id_to_row[int(card.id)] = row
+            except Exception:
+                pass
             is_selected = card.id == self.id_index
             # 更新 ID & Name
             for col, txt in enumerate([str(card.id), card.name]):
@@ -971,15 +1036,16 @@ class CardListSet(QWidget):
                     item.setBackground(QColor(180, 200, 255))  # 淺藍色
                     item.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
 
+    # ---------------- 獲取數據 ----------------
     # 傳回當前卡片
     def get_now_card(self) -> Card | None:
         if self.cdb is None or self.id_index == 0:
             return None
         return self.cdb.get_card(self.id_index)
 
-    # 傳回當前卡片
-    def add_card(self, c: Card):
-        self.cdb.add_card(c)
+    # 增加卡片
+    def add_card(self, card: Card):
+        self.cdb.add_card(card)
 
 
 # 卡片資料組件
@@ -994,8 +1060,10 @@ class CardDataSet(QWidget):
     race: ComboboxSet
     moveset: MoveSet
 
-    def __init__(self, cardinfo: Cardinfo, frame: QLayout):
+    def __init__(self, frame: QLayout):
         super().__init__()
+        # cardinfo
+        cardinfo: Cardinfo = load_cardinfo()
         # id & alias
         self.code = IDSet(frame)
         # 字段
@@ -1013,10 +1081,33 @@ class CardDataSet(QWidget):
         # 移動箭頭
         self.moveset: MoveSet = MoveSet(frame)
 
+    # ---------------- 設定數據 ----------------
     # 讀取卡片並更新卡片資料
     def load_card(self, card: Card):
         self.code.load_card(card)
         self.setname.load_card(card)
+        self.typ.load_card(card)
+        life, cost = card.value, "0"
+        if card.type & 0x8:  # area
+            life, cost = cost, life
+        self.life.set_value(life)
+        self.cost.set_value(cost)
+        self.atk.set_value(card.atk)
+        self.from_.set_value(f"0x{card.from_:X}")
+        self.race.set_value(f"0x{card.race:X}")
+        self.moveset.load_card(card)
+
+    # 清空當前內容
+    def clear(self):
+        self.code.clear()
+        self.setname.set_value(0)
+        self.typ.celear()
+        self.life.set_value("0")
+        self.cost.set_value("0")
+        self.atk.set_value("0")
+        self.from_.set_value("0x0")
+        self.race.set_value("0x0")
+        self.moveset.clear()
 
     # ---------------- 獲取數據 ----------------
     # code
@@ -1049,17 +1140,14 @@ class CardDataSet(QWidget):
 
 # 卡片文本組件
 class CardTextSet(QWidget):
-    main: "MainWindow"
     name: QLineEdit
     image: ImageSet
     hint: HintSet
     desc: QPlainTextEdit
     gene_desc: QPlainTextEdit
 
-    def __init__(self, main: "MainWindow", frame: QLayout):
+    def __init__(self, frame: QLayout):
         super().__init__()
-        self.main = main
-
         # 卡名
         self.name = QLineEdit()
         frame.addWidget(self.name)
@@ -1072,18 +1160,15 @@ class CardTextSet(QWidget):
         frame.addWidget(image_panel)
 
         self.image = ImageSet(image_frame)
-        # 點擊 Image 可導入卡圖（需由 DataEditor 傳入 main 才能儲存至 cdb 資料夾）
         self.image.clicked.connect(self._on_image_clicked)
         self.hint = HintSet(image_frame)
         self.hint.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-
         # 卡片描述
         self.desc = QPlainTextEdit()
         self.desc.setPlaceholderText("卡片描述")
         frame.addWidget(self.desc)
-
         # 進化元效果
         self.gene_desc = QPlainTextEdit()
         self.gene_desc.setPlaceholderText("进化元效果")
@@ -1092,14 +1177,26 @@ class CardTextSet(QWidget):
         self.gene_desc.setFixedHeight(line_height * 5 + 8)  # 顯示約5行，+8留邊距
         frame.addWidget(self.gene_desc)
 
+    # ---------------- 設定數據 ----------------
     # 讀取卡片並更新卡片文本
     def load_card(self, card: Card):
         self.name.setText(card.name)
+        self.hint.load_card(card)
+        desc = card.desc
+        gene_desc = ""
+        desc_lst = desc.splitlines()
+        for i, line in enumerate(desc_lst):
+            if line.startswith("【进化元效果】"):
+                desc = "\n".join(desc_lst[:i])
+                gene_desc = "\n".join(desc_lst[i + 1 :])
+        self.desc.setPlainText(desc)
+        self.gene_desc.setPlainText(gene_desc)
 
     # 點擊時導入卡圖
     def _on_image_clicked(self):
         # 檢查是否存在當前卡
-        if (c := self.main.dataeditor.card_list.get_now_card()) is None:
+        main = get_main()
+        if (card := main.dataeditor.card_list.get_now_card()) is None:
             return
         # 選擇檔案
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1108,10 +1205,30 @@ class CardTextSet(QWidget):
         if not file_path:
             return
 
-        cdb_dir = os.path.dirname(self.main.windowTitle())
+        cdb_dir = os.path.dirname(main.windowTitle())
         pics_dir = os.path.join(cdb_dir, "pics")
         os.makedirs(pics_dir, exist_ok=True)
-        img_path = os.path.join(pics_dir, f"c{int(c.id)}.jpg")
+        img_path = os.path.join(pics_dir, f"c{int(card.id)}.jpg")
 
         shutil.copyfile(file_path, img_path)
         self.image.set_image(img_path)
+
+    # 清空當前內容
+    def clear(self):
+        self.name.setText("")
+        self.hint.clear()
+        self.desc.setPlainText("")
+        self.gene_desc.setPlainText("")
+        self.image.set_image("")
+
+    # ---------------- 獲取數據 ----------------
+    # text list
+    def get_text_list(self, is_mons: bool) -> list[str]:
+        res_lst = [self.name.text()]
+        desc = self.desc.toPlainText()
+        if is_mons and (gene := self.gene_desc.toPlainText()):
+            desc += "\n【进化元效果】\n" + gene
+        res_lst.append(desc)
+        res_lst += self.hint.get_hints()
+
+        return res_lst

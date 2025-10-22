@@ -143,39 +143,37 @@ class CDB:
 
     def add_card(self, c: Card):
         self.cards[c.id] = c
+        self.save()
+
+    def del_card(self, id: int):
+        del self.cards[id]
+        self.save()
 
     def save(self):
         conn = sqlite3.connect(self.path)
         try:
             cur = conn.cursor()
-            # ensure tables exist (schema from creat_new_cdb)
             cur.execute(DATAS_SQL_SET)
             cur.execute(TEXTS_SQL_SET)
-            # clear existing data
             cur.execute("DELETE FROM datas")
             cur.execute("DELETE FROM texts")
-            # insert rows from self.cards
-            for cid, card in self.cards.items():
-                # datas: id, alias, setcode, type, value, atk, move, race, from
+            for _, card in self.cards.items():
                 data_row = (
-                    int(card.id),
-                    int(card.alias),
-                    int(card.setcode),
-                    int(card.type),
-                    int(card.value),
-                    int(card.atk),
-                    int(card.move),
-                    int(card.race),
-                    int(card.from_),
+                    card.id,
+                    card.alias,
+                    card.setcode,
+                    card.type,
+                    card.value,
+                    card.atk,
+                    card.move,
+                    card.race,
+                    card.from_,
                 )
                 cur.execute(
                     "INSERT INTO datas VALUES (?,?,?,?,?,?,?,?,?)",
                     data_row,
                 )
-
-                # texts: id, name, desc, hint1..hint16
-                hints = list(card.hints) if card.hints else []
-                # ensure 16 hints
+                hints = card.hints
                 if len(hints) < 16:
                     hints += [""] * (16 - len(hints))
                 else:

@@ -48,5 +48,5 @@ def load_cardinfo() -> dict[str, dict[str, str]]:
 
     if info_key:
         info.set_key_dict(info_key, info_title, item_dict, info_default)
-        
+
     return info
