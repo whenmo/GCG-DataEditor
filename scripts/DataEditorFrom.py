@@ -2,12 +2,14 @@ from DataBase import CDB, Card
 from ItemLib import (
     new_frame,
     new_panel,
+    new_btn,
     CardListSet,
     CardDataSet,
     CardTextSet,
 )
-from PyQt6.QtWidgets import QWidget, QPushButton, QHBoxLayout
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence, QShortcut
 from Global import get_main
 
 
@@ -15,6 +17,13 @@ class DataEditor(QWidget):
     card_list: CardListSet
     card_data: CardDataSet
     card_text: CardTextSet
+
+    resetl_btn: QPushButton
+    resetc_btn: QPushButton
+    script_btn: QPushButton
+    addcard_btn: QPushButton
+    savcard_btn: QPushButton
+    delcard_btn: QPushButton
 
     def __init__(self):
         super().__init__()
@@ -25,11 +34,11 @@ class DataEditor(QWidget):
         # 卡片文本編輯區
         self.card_text = CardTextSet(mid_frame)
         # 搜索 & 重置 & 脚本 按鈕
-        btn_frame = new_frame("H", mid_frame)
-        self.search_btn = QPushButton("搜索")
-        self.script_btn = QPushButton("脚本")
-        btn_frame.addWidget(self.search_btn)
-        btn_frame.addWidget(self.script_btn)
+        btn_frame: QHBoxLayout = new_frame("H", mid_frame)
+        btn_frame.addStretch()
+        self.resetl_btn = new_btn("重置列表", btn_frame)
+        self.script_btn = new_btn("脚本", btn_frame)
+        self.resetc_btn = new_btn("重置资料", btn_frame, self.clear)
         btn_frame.addStretch()
         # ---------------- 右側容器 ----------------
         right_panel, right_frame = new_panel("V")
@@ -38,17 +47,18 @@ class DataEditor(QWidget):
         self.card_data = CardDataSet(right_frame)
         right_frame.addStretch()
         # 添加 & 修改 & 删除 按鈕
-        btn_frame = new_frame("H", right_frame)
-        self.savecard_btn = QPushButton("保存")
-        self.resetcard_btn = QPushButton("重置")
-        self.delcard_btn = QPushButton("删除")
-        self.delcard_btn.setStyleSheet("background-color: #d9534f; color: black;")
-        btn_frame.addWidget(self.savecard_btn)
-        btn_frame.addWidget(self.resetcard_btn)
-        btn_frame.addWidget(self.delcard_btn)
-        self.savecard_btn.clicked.connect(self.save_card)
-        self.resetcard_btn.clicked.connect(self.clear)
-        self.delcard_btn.clicked.connect(self.delete_card)
+        btn_frame: QHBoxLayout = new_frame("H", right_frame)
+        btn_frame.addStretch()
+        self.addcard_btn = new_btn("添加", btn_frame, self.add_card)
+        self.savcard_btn = new_btn("保存 Ctrl + S", btn_frame, self.save_card)
+        self.delcard_btn = new_btn(
+            "删除",
+            btn_frame,
+            self.delete_card,
+            "background-color: #d9534f; color: black;",
+        )
+        shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        shortcut.activated.connect(self.savcard_btn.click)  # 按下時模擬按鈕點擊
         btn_frame.addStretch()
         # ---------------- 設置中央 Widget ----------------
         main_frame: QHBoxLayout = new_frame("H", self, None, False)
@@ -87,6 +97,23 @@ class DataEditor(QWidget):
         c.set_text(text_lst)
         return c
 
+    # 添加卡片
+    def add_card(self):
+        main = get_main()
+        id, _ = self.card_data.get_code()
+        if (fb := main.file_list.get_file_btn()) is None:
+            return
+        if id == 0:
+            main.show_error("ID 不能為 0")
+            return
+        cdb = fb.cdb
+        if (now_c := self.card_list.get_now_card()) is not None and now_c.id != id:
+            if cdb.has_id(id) and not main.show_quest(f"{id} 已存在, 是否覆盖"):
+                return
+        # 儲存新卡
+        cdb.add_card(self.pack_card_data())
+        self.card_list.update(cdb, id)
+
     # 保存卡片
     def save_card(self):
         main = get_main()
@@ -106,6 +133,7 @@ class DataEditor(QWidget):
         # 儲存新卡
         cdb.add_card(self.pack_card_data())
         self.card_list.update(cdb, id)
+        main.show_msg("修改成功")
 
     # 刪除卡片
     def delete_card(self):

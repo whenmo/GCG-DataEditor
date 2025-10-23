@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QPushButton,
     QFileDialog,
+    QApplication,
 )
 import shutil
 from PyQt6.QtGui import QPixmap, QTextCursor, QColor, QPainter, QBrush, QAction
@@ -57,7 +58,6 @@ class CdbFileBtn(QWidget):
 
         self.select()
         self.setFixedSize(100, 30)  # 容器大小
-        # 延遲訪問 get_main()，避免在 widget 初始化流程中因載入順序造成 MAIN 為 None
         QTimer.singleShot(0, self._ensure_main_visible)
 
     # 載入 cdb
@@ -307,6 +307,26 @@ def new_title(title: str, frame: QLayout):
     size_policy.setVerticalPolicy(QSizePolicy.Policy.Fixed)  # 禁止垂直拉伸
     lab.setSizePolicy(size_policy)
     frame.addWidget(lab)
+
+
+# 按鈕組件
+def new_btn(
+    title: str, frame: QLayout, clicked_func=None, style: str = ""
+) -> QPushButton:
+    btn = QPushButton(title)
+    style = f"""
+        QPushButton {{
+            min-width: 100px;
+            font-size: 12px;
+            {style}
+        }}
+    """
+    btn.setStyleSheet(style)
+    btn.setFixedHeight(30)
+    frame.addWidget(btn)
+    if clicked_func:
+        btn.clicked.connect(clicked_func)
+    return btn
 
 
 # ---------- DataEditor unit item ----------
@@ -616,6 +636,7 @@ class TypeSet(QWidget):
 class SetNameSet(QWidget):
     comboboxs: list[QComboBox]
     lineedits: list[QLineEdit]
+    copybtns: list[QPushButton]
     _updating: bool
 
     def __init__(self, info: tuple[str, dict[str, str]], frame: QLayout):
@@ -638,20 +659,25 @@ class SetNameSet(QWidget):
             row_frame.addWidget(set_cb)
             for setname, value in zip(names, values):
                 set_cb.addItem(setname, value.upper())
-            # 右側 LineEdit
+            # 中央 LineEdit
             set_le = QLineEdit("0")
             set_le.setAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
             set_le.setFixedWidth(80)  # 固定寬度
             row_frame.addWidget(set_le)
-
+            # 右側 copy buttom
+            copy_btn = QPushButton("复制")
+            copy_btn.setFixedWidth(50)
+            row_frame.addWidget(copy_btn)
+            # 綁定事件
             set_cb.currentIndexChanged.connect(
                 lambda idx, le=set_le, cb=set_cb: self._combobox_changed(cb, le)
             )
             set_le.textChanged.connect(
                 lambda text, le=set_le, cb=set_cb: self._lineedit_changed(le, cb)
             )
+            copy_btn.clicked.connect(lambda chk, le=set_le: self._copy_value(le))
             main_frame.addWidget(row_panel)
             self.comboboxs.append(set_cb)
             self.lineedits.append(set_le)
@@ -685,11 +711,18 @@ class SetNameSet(QWidget):
             ind, _ = self.get_key_val(lineedit.text())
             combobox.setCurrentIndex(ind)
 
+    def _copy_value(self, le: QLineEdit):
+        val = le.text().upper()
+        if not val.startswith("0X"):
+            val = f"0X{val}"
+        QApplication.clipboard().setText(val)
+
     def get_setname(self) -> int:
-        """get the sum of setname"""
         res = 0
         for i, lineedit in enumerate(self.lineedits):
             val_str = (lineedit.text() or "0").upper()
+            if val_str.startswith("0X"):
+                val_str = val_str[2:]
             if re.fullmatch(r"[0-9A-F]+", val_str):
                 res += int(val_str, 16) << (i * 16)
         return res
@@ -742,7 +775,7 @@ class MoveSet(QWidget):
         main_frame: QHBoxLayout = new_frame("H", self)
 
         # 左側 Label
-        lab = QLabel("移动/攻击方向")
+        lab = QLabel("移动方向")
         lab.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         main_frame.addWidget(lab)
 
@@ -900,6 +933,10 @@ class CardListSet(QWidget):
     id_index: int
     id_to_row: dict[int, int]
 
+    rows_per_page: int = 10  # 默認值，可被自動覆蓋
+    current_page: int = 1
+    total_page: int = 1
+
     def __init__(self):
         super().__init__()
         self.id_index = 0
@@ -914,19 +951,56 @@ class CardListSet(QWidget):
         self.card_lst.itemClicked.connect(self.on_item_clicked)
         # 按鈕控制區
         page_frame: QHBoxLayout = new_frame("H", main_frame)
-        self.prev_btn = QPushButton("上一頁")
+        page_frame.addStretch()
+
+        self.prev_btn = new_btn("上一頁", page_frame, self.prev_page)
+
         self.page_text = QLineEdit("1")
+        self.page_text.setStyleSheet("font-size: 12px;")
         self.page_text.setFixedWidth(40)
         self.page_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.page_label = QLabel("/ 1")
-        self.next_btn = QPushButton("下一頁")
-        page_frame.addWidget(self.prev_btn)
+        self.page_text.returnPressed.connect(self.goto_page)
         page_frame.addWidget(self.page_text)
+
+        self.page_label = QLabel("/ 1")
+        self.page_label.setStyleSheet("font-size: 12px;")
         page_frame.addWidget(self.page_label)
-        page_frame.addWidget(self.next_btn)
+
+        self.next_btn = new_btn("下一頁", page_frame, self.next_page)
+
         page_frame.addStretch()
 
     # ---------------- 內部事件 ----------------
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.calc_rows_per_page()
+        if self.cdb:
+            self.update(self.cdb, self.id_index)
+
+    # 上一頁
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.update(self.cdb, self.id_index)
+
+    # 下一頁
+    def next_page(self):
+        if self.current_page < self.total_page:
+            self.current_page += 1
+            self.update(self.cdb, self.id_index)
+
+    # 跳轉到指定頁
+    def goto_page(self):
+        try:
+            page = int(self.page_text.text())
+        except ValueError:
+            page = self.current_page
+        if 1 <= page <= self.total_page:
+            self.current_page = page
+            self.update(self.cdb, self.id_index)
+        else:
+            self.page_text.setText(str(self.current_page))
+
     # 點擊時事件
     def on_item_clicked(self, item: QTableWidgetItem):
         row = item.row()
@@ -969,72 +1043,96 @@ class CardListSet(QWidget):
         """根據目前 self._cdb 的順序移動 now_ind 並觸發 on_item_clicked。"""
         if not self.cdb or not self.cdb.cards:
             return
-
         keys = list(self.cdb.cards.keys())
         # 嘗試找到目前 now_ind 的索引
         try:
             cur_idx = keys.index(self.id_index)
-        except ValueError:
-            # 若目前沒有選擇（now_ind 不在列表內），從 -1 開始
+        except ValueError:  # 若沒有選擇，從 -1 開始
             cur_idx = -1
 
         new_idx = cur_idx + delta
         if new_idx < 0 or new_idx >= len(keys):
             return  # 超出範圍則不動作
 
-        new_id = keys[new_idx]
+        new_page = (new_idx // self.rows_per_page) + 1
+        # 目標行在當前頁，直接觸發 on_item_clicked
+        if new_page == self.current_page:
+            cur_row = new_idx % self.rows_per_page
+        else:
+            self.current_page = new_page
+            self.update(self.cdb, self.id_index)
+            if delta == 1:
+                cur_row = 0
+            else:
+                cur_row = self.card_lst.rowCount() - 1
 
-        # 找到對應的 row，並呼叫 on_item_clicked（模擬點擊）
-        for row, id in enumerate(keys):
-            if id == new_id:
-                item = self.card_lst.item(row, 0)
-                if item is not None:
-                    # 直接呼叫 on_item_clicked，會更新 now_ind 與外觀
-                    self.on_item_clicked(item)
-                    # 讓 CardListSet 保持焦點以持續接收鍵盤事件
-                    self.setFocus()
-                break
+        self.on_item_clicked(self.card_lst.item(cur_row, 0))
+        self.setFocus()
+
+    def calc_rows_per_page(self):
+        # 顯示欄數 = 卡片列表 widget 高度 / 單行高度
+        show_row = self.card_lst.viewport().height() // 30
+        self.rows_per_page = max(1, show_row)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.cdb:
+            self.update(self.cdb, self.id_index)
 
     # ---------------- 設定數據 ----------------
     # 更新卡片列表
     def update(self, cdb: CDB | None = None, ind: int | None = None):
-        # 儲存 cdb 以供鍵盤導覽使用
         self.cdb = cdb
-
         self.card_lst.setRowCount(0)
         self.id_index = 0 if ind is None else ind
         if cdb is None:
+            self.current_page = 1
+            self.total_page = 1
+            self.page_text.setText(str(self.current_page))
+            self.page_label.setText(f"/ {self.total_page}")
             return
+
+        # 計算動態每頁行數
+        self.calc_rows_per_page()
 
         # 使用數值排序的 keys（根據 card id 的大小），以確保表格按 ID 大小顯示
         try:
             keys = sorted(cdb.cards.keys(), key=lambda k: int(k))
         except Exception:
-            # 若 key 不是可轉為 int，退回到原始順序
-            keys = list(cdb.cards.keys())
+            keys = cdb.cards.keys()
 
-        self.card_lst.setRowCount(len(keys))
-        for row, id in enumerate(keys):
-            card = cdb.cards[id]
-            # 存儲 id -> row 映射以便快速查找
-            try:
-                self.id_to_row[int(card.id)] = row
-            except Exception:
-                pass
+        # 計算總頁數
+        self.total_page = max(
+            1, (len(keys) + self.rows_per_page - 1) // self.rows_per_page
+        )
+        if self.current_page > self.total_page:
+            self.current_page = self.total_page
+
+        # 更新 page_text 與 page_label
+        self.page_text.setText(str(self.current_page))
+        self.page_label.setText(f"/ {self.total_page}")
+
+        # 計算當前頁的索引範圍
+        start_idx = (self.current_page - 1) * self.rows_per_page
+        end_idx = min(start_idx + self.rows_per_page, len(keys))
+
+        self.card_lst.setRowCount(end_idx - start_idx)
+        self.id_to_row.clear()
+
+        for row, key_idx in enumerate(range(start_idx, end_idx)):
+            card_id = keys[key_idx]
+            card = cdb.cards[card_id]
+            self.id_to_row[int(card.id)] = row
             is_selected = card.id == self.id_index
-            # 更新 ID & Name
             for col, txt in enumerate([str(card.id), card.name]):
-                item = self.card_lst.item(row, col)
-                if item is None:
-                    item = QTableWidgetItem()
-                    self.card_lst.setItem(row, col, item)
-                item.setText(txt)
+                item = QTableWidgetItem(txt)
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                 )
                 if is_selected:
-                    item.setBackground(QColor(180, 200, 255))  # 淺藍色
-                    item.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
+                    item.setBackground(QColor(180, 200, 255))
+                    item.setForeground(QColor(0, 0, 0))
+                self.card_lst.setItem(row, col, item)
 
     # ---------------- 獲取數據 ----------------
     # 傳回當前卡片
@@ -1087,12 +1185,12 @@ class CardDataSet(QWidget):
         self.code.load_card(card)
         self.setname.load_card(card)
         self.typ.load_card(card)
-        life, cost = card.value, "0"
-        if card.type & 0x8:  # area
+        life, cost = 0, card.value
+        if card.type & 0x8:
             life, cost = cost, life
-        self.life.set_value(life)
-        self.cost.set_value(cost)
-        self.atk.set_value(card.atk)
+        self.life.set_value(f"{life}")
+        self.cost.set_value(f"{cost}")
+        self.atk.set_value(f"{card.atk}")
         self.from_.set_value(f"0x{card.from_:X}")
         self.race.set_value(f"0x{card.race:X}")
         self.moveset.load_card(card)
@@ -1150,6 +1248,7 @@ class CardTextSet(QWidget):
         super().__init__()
         # 卡名
         self.name = QLineEdit()
+        self.name.setAlignment(Qt.AlignmentFlag.AlignCenter)  # 文字置中
         frame.addWidget(self.name)
 
         # 卡圖 & 脚本提示文字
@@ -1182,6 +1281,7 @@ class CardTextSet(QWidget):
     def load_card(self, card: Card):
         self.name.setText(card.name)
         self.hint.load_card(card)
+        self.image.load_card(card)
         desc = card.desc
         gene_desc = ""
         desc_lst = desc.splitlines()
