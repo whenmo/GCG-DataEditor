@@ -26,7 +26,7 @@ import shutil
 from PyQt6.QtGui import QPixmap, QTextCursor, QColor, QPainter, QBrush, QAction
 from PyQt6.QtCore import pyqtSignal, Qt, QRect, QTimer
 from Global import get_main
-
+from Global import PATH_COVER
 
 # ---------- MainWindow item ----------
 # 檔案分頁按鈕
@@ -408,7 +408,6 @@ class CardTable(QTableWidget):
 
 # 卡圖容器
 class ImageSet(QLabel):
-    default_path: str
     clicked = pyqtSignal()
 
     def __init__(self, frame: QLayout):
@@ -416,20 +415,19 @@ class ImageSet(QLabel):
         self.setFixedSize(200, 285)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.default_path = "data/cover.jpg"
-        self.set_image(self.default_path)
+        self.set_image(PATH_COVER)
 
         frame.addWidget(self)
 
     def set_image(self, path: str = ""):
-        # 只接受 .jpg 檔案，否則使用 default_path
+        # 只接受 .jpg 檔案，否則使用 PATH_COVER
         try:
             is_jpg = isinstance(path, str) and path.lower().endswith(".jpg")
         except Exception:
             is_jpg = False
 
         if not (is_jpg and os.path.exists(path)):
-            path = self.default_path
+            path = PATH_COVER
 
         pixmap = QPixmap(path)
         if not pixmap.isNull():

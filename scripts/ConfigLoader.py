@@ -1,8 +1,7 @@
 import os
 import json
+from Global import PATH_CARDINFO, PATH_CONFIG
 
-PATH_CARDINFO: str = "data/cardinfo.txt"
-PATH_CONFIG: str = "data/config.json"
 DEFAULT_CONFIG = {"DATABASE_HISTORY": {"max_record": 10, "history_paths": []}}
 
 

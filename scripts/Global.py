@@ -1,3 +1,5 @@
+import os
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,3 +17,17 @@ def set_main(m: "MainWindow | None") -> None:
 
 def get_main() -> "MainWindow | None":
     return _MAIN
+
+
+def get_base_path():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE_DIR = get_base_path()
+PATH_CARDINFO: str = os.path.join(BASE_DIR, "data", "cardinfo.txt")
+PATH_CONFIG: str = os.path.join(BASE_DIR, "data", "config.json")
+PATH_COVER: str = os.path.join(BASE_DIR, "data", "cover.jpg")
+PATH_ICON: str = os.path.join(BASE_DIR, "data", "app_icon.png")

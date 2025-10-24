@@ -1,4 +1,5 @@
 import sys
+import os
 import webbrowser
 from ConfigLoader import load_config, update_history, save_config
 from DataBase import creat_new_cdb
@@ -15,7 +16,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QDataStream
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from Global import PATH_ICON
+
+APP_ID = "EternalFieldDataEditor"
 
 
 def new_toolbtn(title: str, toolbar: QToolBar) -> QMenu:
@@ -43,15 +48,20 @@ class MainWindow(QMainWindow):
     act_paste: QAction
     hist_menu: QMenu
     config: dict
+    local_server: QLocalServer | None
 
-    def __init__(self):
+    def __init__(self, cdb_path: str = None, local_server: QLocalServer = None):
         super().__init__()
         self.config = load_config()
         set_main(self)
         self.title = "Eternal Field DataEditor"
         self.setWindowTitle(self.title)
         self.resize(850, 650)
-        self.setWindowIcon(QIcon("data/app_icon.png"))
+        self.setWindowIcon(QIcon(PATH_ICON))
+        # ---------------- 處理單例通信 ----------------
+        self.local_server = local_server
+        if self.local_server:
+            self.local_server.newConnection.connect(self.handle_incoming_connection)
         # 工具列
         main_toolbar = QToolBar("main")
         self.addToolBar(main_toolbar)
@@ -81,6 +91,40 @@ class MainWindow(QMainWindow):
         act_copy_sel.triggered.connect(self.dataeditor.copy_select_card)
         act_copy_all.triggered.connect(self.dataeditor.copy_all_card)
         self.act_paste.triggered.connect(self.dataeditor.paste_cards)
+        # ---------------- 處理命令行參數 (自動載入雙擊的文件) ----------------
+        if cdb_path and os.path.exists(cdb_path):
+            self.open_path(cdb_path)
+
+    # ---------------- 處理單例通信 ----------------
+    def handle_incoming_connection(self):
+        """處理來自第二個應用程序實例的傳入連接"""
+        # 獲取傳入的本地套接字
+        socket = self.local_server.nextPendingConnection()
+        if socket:
+            # 設置信號來讀取數據
+            socket.readyRead.connect(lambda s=socket: self.read_path_from_socket(s))
+            # 確保連接斷開後套接字被刪除
+            socket.disconnected.connect(socket.deleteLater)
+
+    def read_path_from_socket(self, socket: QLocalSocket):
+        """從 QLocalSocket 讀取傳入的檔案路徑並開啟"""
+        # 必須使用 QDataStream 來確保跨進程的數據格式正確
+        stream = QDataStream(socket)
+        # 設置數據流模式為只讀
+        stream.setDevice(socket)
+        # 檢查是否有足夠的數據可供讀取
+        if socket.bytesAvailable() < 2:  # 至少需要2個字節來讀取字符串長度
+            return
+        try:
+            # 讀取傳送過來的文件路徑
+            path = stream.readQString()
+            if path and os.path.exists(path):
+                self.open_path(path)
+        except Exception as e:
+            # 處理讀取異常
+            self.show_error(f"讀取文件路徑時發生錯誤: {e}")
+        # 完成讀取後，斷開套接字連接
+        socket.disconnectFromServer()
 
     # ---------------- 彈窗 ----------------
     # 詢問組件
@@ -184,5 +228,24 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    MainWindow().show()
+    cdb_path = sys.argv[1] if len(sys.argv) > 1 else None
+
+    socket = QLocalSocket()
+    socket.connectToServer(APP_ID)
+    if socket.waitForConnected(500):
+        if cdb_path:
+            stream = QDataStream(socket)
+            stream.writeQString(cdb_path)
+        socket.disconnectFromServer()
+        sys.exit(0)
+    QLocalServer.removeServer(APP_ID)
+    server = QLocalServer()
+    if not server.listen(APP_ID):
+        QMessageBox.critical(
+            None, "錯誤", f"無法啟動單例服務器 ({APP_ID}): {server.errorString()}"
+        )
+        sys.exit(1)
+
+    window = MainWindow(cdb_path=cdb_path, local_server=server)
+    window.show()
     sys.exit(app.exec())
