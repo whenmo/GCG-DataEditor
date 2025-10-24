@@ -1,5 +1,6 @@
 import sys
-import os
+import webbrowser
+from ConfigLoader import load_config, update_history, save_config
 from DataBase import creat_new_cdb
 from DataEditorFrom import DataEditor
 from ItemLib import FileBtnToolBar
@@ -27,38 +28,25 @@ def new_toolbtn(title: str, toolbar: QToolBar) -> QMenu:
     return menu
 
 
-def new_action(title: str, frame, menu: QMenu, func):
+def new_action(title: str, frame, menu: QMenu, func=None) -> QAction:
     act = QAction(title, frame)
     menu.addAction(act)
     if func:
         act.triggered.connect(func)
-
-
-def load_hist() -> list[str]:
-    res = []
-    with open("data/history.txt", "a+", encoding="utf-8") as f:
-        f.seek(0)
-        res = f.read().splitlines()
-    return res
-
-
-def set_hist(hist_lst: list[str]):
-    path = "data/history.txt"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(hist_lst))
+    return act
 
 
 class MainWindow(QMainWindow):
     file_list: FileBtnToolBar
     dataeditor: DataEditor
     title: str
+    act_paste: QAction
     hist_menu: QMenu
-    hist_list: list[str]
+    config: dict
 
     def __init__(self):
         super().__init__()
-        # 註冊到 AppContext，避免循環匯入
+        self.config = load_config()
         set_main(self)
         self.title = "Eternal Field DataEditor"
         self.setWindowTitle(self.title)
@@ -70,10 +58,17 @@ class MainWindow(QMainWindow):
         file_menu = new_toolbtn("文件", main_toolbar)
         new_action("打开", self, file_menu, self.open_cdb)
         new_action("新建", self, file_menu, self.new_cdb)
+        file_menu.addSeparator()
+        act_copy_sel = new_action("复制选中卡片", self, file_menu)
+        act_copy_all = new_action("复制所有卡片", self, file_menu)
+        self.act_paste = new_action("粘贴卡片", self, file_menu)
         # ---------------- 歷史 ----------------
         self.hist_menu = new_toolbtn("数据库历史", main_toolbar)
-        self.hist_list = load_hist()
-        self.updata_hist_btn()
+        self.updata_hist_menu()
+        # ---------------- 幫助 ----------------
+        help_menu = new_toolbtn("帮助", main_toolbar)
+        new_action("关于", self, help_menu, self.about_info)
+        new_action("github", self, help_menu, self.go_github)
         # ---------------- 檔案列表 ----------------
         self.addToolBarBreak()  # 讓下一個工具列換行，放在主工具列下方
         self.file_list = FileBtnToolBar()
@@ -81,6 +76,10 @@ class MainWindow(QMainWindow):
         # ---------------- 數據編輯器 ----------------
         self.dataeditor = DataEditor()
         self.setCentralWidget(self.dataeditor)
+        # 綁定事件
+        act_copy_sel.triggered.connect(self.dataeditor.copy_select_card)
+        act_copy_all.triggered.connect(self.dataeditor.copy_all_card)
+        self.act_paste.triggered.connect(self.dataeditor.paste_cards)
 
     # ---------------- 彈窗 ----------------
     # 詢問組件
@@ -106,40 +105,11 @@ class MainWindow(QMainWindow):
     def show_msg(self, msg: str):
         QMessageBox.information(self, "提示", msg)
 
-    # ---------------- 歷史 ----------------
-    # 更新歷史欄
-    def updata_hist_btn(self):
-        self.hist_menu.clear()
-        for path in self.hist_list:
-            new_action(
-                path,
-                self,
-                self.hist_menu,
-                lambda c, p=path: self.file_list.add_cdbfile(p),
-            )
-        self.hist_menu.addSeparator()
-        new_action("清空历史纪录", self, self.hist_menu, self.del_hist)
-
-    # 增加歷史
-    def add_hist(self, path: str):
-        if path in self.hist_list:
-            self.hist_list.remove(path)
-        self.hist_list.insert(0, path)
-        if len(self.hist_list) > 10:
-            self.hist_list = self.hist_list[:10]
-        set_hist(self.hist_list)
-
-    # 刪除歷史
-    def del_hist(self):
-        self.hist_list = []
-        set_hist(self.hist_list)
-        self.updata_hist_btn()
-
     # ---------------- 文件 ----------------
     # 根據路徑打開 cdb
     def open_path(self, path: str):
-        self.add_hist(path)
-        self.updata_hist_btn()
+        self.add_hist_path(path)
+        self.updata_hist_menu()
         self.file_list.add_cdbfile(path)
 
     # 開啟 cdb
@@ -160,6 +130,55 @@ class MainWindow(QMainWindow):
             return
         creat_new_cdb(path)
         self.open_path(path)
+
+    # ---------------- 粘贴卡片 ----------------
+    def update_paste_action_text(self, count: int):
+        title = "粘贴卡片"
+        if count > 0:
+            title += f" ({count})"
+        self.act_paste.setText(title)
+
+    # ---------------- 歷史 ----------------
+    # 獲取歷史列表
+    def get_hist_list(self) -> list[str]:
+        return self.config.get("DATABASE_HISTORY", {}).get("history_paths", [])
+
+    # 更新歷史欄
+    def updata_hist_menu(self):
+        self.hist_menu.clear()
+        hist_list = self.get_hist_list()
+        for path in hist_list:
+            new_action(
+                path,
+                self,
+                self.hist_menu,
+                lambda c, p=path: self.file_list.add_cdbfile(p),
+            )
+        self.hist_menu.addSeparator()
+        new_action("清空历史纪录", self, self.hist_menu, self.clear_hist)
+
+    # 增加歷史
+    def add_hist_path(self, path: str):
+        self.config = update_history(self.config, path)
+        self.updata_hist_menu()
+
+    # 刪除歷史
+    def clear_hist(self):
+        if "DATABASE_HISTORY" in self.config:
+            self.config["DATABASE_HISTORY"]["history_paths"] = []
+            save_config(self.config)
+        self.updata_hist_menu()
+
+    # ---------------- 幫助 ----------------
+    # 關於
+    def about_info(self):
+        msg = "ver :  1.0\n作者 : whenmo"
+        self.show_msg(msg)
+
+    # github
+    def go_github(self):
+        url = "https://github.com/whenmo/Eternal-Field-DataEditor"
+        webbrowser.open_new_tab(url)
 
 
 if __name__ == "__main__":

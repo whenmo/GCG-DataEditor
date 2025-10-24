@@ -99,91 +99,186 @@ class Card:
 
 class CDB:
     path: str
-    cards: dict[int, Card]
+    card_dict: dict[int, Card]
+    now_id: int
+    show_id_lst: list[int]
+    select_id_lst: set[int]
 
     def __init__(self, path: str):
+        # 初始化
         self.path = path
-        self.cards = {}
+        self.card_dict = {}
+        self.now_id = 0
+        self.show_id_lst = []
+        self.select_id_lst = set()
+        # 設定 card_dict
         try:
             with sqlite3.connect(self.path) as conn:
                 cursor = conn.cursor()
-            cursor.execute("SELECT * FROM datas")
-            datas = cursor.fetchall()
-            cursor.execute("SELECT * FROM texts")
-            texts = cursor.fetchall()
-
-            self.index: int = datas[0][0] if datas else 0
+                cursor.execute("SELECT * FROM datas")
+                datas = cursor.fetchall()
+                cursor.execute("SELECT * FROM texts")
+                texts = cursor.fetchall()
             for data, text in zip(datas, texts):
                 card = Card(data[0])
                 card.set_data(data)
                 card.set_text(text)
-                self.cards[data[0]] = card
+                self.card_dict[data[0]] = card
         except Exception:
-            return None
+            pass
+        # 初始化顯示
+        if self.card_dict:
+            self.show_id_lst = sorted(self.card_dict.keys(), key=lambda k: int(k))
+            self.now_id = self.show_id_lst[0]
+            self.select_id_lst.add(self.now_id)
 
+    # ---------------- 設定數據 ----------------
+    def add_card(self, c: Card):
+        """增加一張卡"""
+        self.card_dict[c.id] = c
+        self.save()
+
+        self.show_id_lst = sorted(self.card_dict.keys(), key=lambda k: int(k))
+
+        self.now_id = c.id
+        self.select_id_lst.clear()
+        self.select_id_lst.add(self.now_id)
+
+    def del_card(self, id: int):
+        """刪除 id 的卡"""
+        if id in self.card_dict:
+            del self.card_dict[id]
+            self.save()
+
+    def save(self):
+        """將 cdb 保存到 path"""
+        try:
+            with sqlite3.connect(self.path) as conn:
+                cur = conn.cursor()
+                cur.execute(DATAS_SQL_SET)
+                cur.execute(TEXTS_SQL_SET)
+                cur.execute("DELETE FROM datas")
+                cur.execute("DELETE FROM texts")
+                sorted_cards = sorted(self.card_dict.values(), key=lambda card: card.id)
+                for card in sorted_cards:
+                    data_row = (
+                        card.id,
+                        card.alias,
+                        card.setcode,
+                        card.type,
+                        card.value,
+                        card.atk,
+                        card.move,
+                        card.race,
+                        card.from_,
+                    )
+                    cur.execute(
+                        "INSERT INTO datas VALUES (?,?,?,?,?,?,?,?,?)",
+                        data_row,
+                    )
+                    hints = card.hints
+                    if len(hints) < 16:
+                        hints += [""] * (16 - len(hints))
+                    else:
+                        hints = hints[:16]
+                    text_row = (int(card.id), card.name or "", card.desc or "", *hints)
+                    cur.execute(
+                        "INSERT INTO texts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        text_row,
+                    )
+
+                conn.commit()
+        except Exception:
+            pass
+
+    # ---------------- 獲取數據 ----------------
     def get_first_id(self) -> int:
-        if not self.cards:
+        """獲取第一張卡的 id"""
+        if not self.card_dict:
             return 0
-        return next(iter(self.cards))
+        return next(iter(self.card_dict))
 
-    # 回傳指定 id 的 Card 輸入可為 int/str/None 找不到對應 id 也回傳 None
     def get_card(self, id: int | str | None) -> Card | None:
+        """回傳指定 id 的 Card, 找不到對應 id 回傳 None"""
         if not id:
             return None
         try:
             key = int(id)
         except (TypeError, ValueError):
             return None
-        return self.cards.get(key)
+        return self.card_dict.get(key)
 
     def has_id(self, id: int) -> bool:
-        if id in self.cards:
+        """檢查是否存在 id"""
+        if id in self.card_dict:
             return True
         return False
 
-    def add_card(self, c: Card):
-        self.cards[c.id] = c
+    def search_id(self, id_prefix: str):
+        """
+        根據 id 篩選卡片, 如果為空則顯示所有卡片, 同時清空已選中的卡
+        不會回傳值, 只會更新內部的 now_id, show_id_lst 和 select_id_lst
+        """
+        if id_prefix:
+            match_id_lst = [
+                id for id in self.card_dict.keys() if str(id).startswith(id_prefix)
+            ]
+            self.show_id_lst = match_id_lst
+        else:
+            self.show_id_lst = sorted(self.card_dict.keys(), key=lambda k: int(k))
+
+        if self.now_id in self.show_id_lst:
+            pass
+        elif self.show_id_lst:
+            self.now_id = self.show_id_lst[0]
+        else:
+            self.now_id = 0
+        self.select_id_lst.clear()
+        self.select_id_lst.add(self.now_id)
+
+    def search_name(self, name: str):
+        """
+        根據 name 篩選卡片, 如果為空則顯示所有卡片, 同時清空已選中的卡
+        不會回傳值, 只會更新內部的 now_id, show_id_lst 和 select_id_lst
+        """
+        if name:
+            name_lower = name.lower()  # 進行不區分大小寫的匹配
+            match_id_lst = [
+                key
+                for key, card in self.card_dict.items()
+                if card.name and name_lower in card.name.lower()
+            ]
+            self.show_id_lst = match_id_lst
+        else:
+            self.show_id_lst = sorted(self.card_dict.keys(), key=lambda k: int(k))
+
+        if self.now_id in self.show_id_lst:
+            pass
+        elif self.show_id_lst:
+            self.now_id = self.show_id_lst[0]
+        else:
+            self.now_id = 0
+        self.select_id_lst.clear()
+        self.select_id_lst.add(self.now_id)
+
+    def del_select_card(self):
+        """刪除 self.select_id_lst 中選中的所有卡片, 然後更新 now_id, show_id_lst 和 select_id_lst"""
+        if not self.select_id_lst:
+            return
+
+        del_id_lst = self.select_id_lst.copy()
+        for id in del_id_lst:
+            if id in self.card_dict:
+                del self.card_dict[id]
+
         self.save()
 
-    def del_card(self, id: int):
-        del self.cards[id]
-        self.save()
+        self.show_id_lst = [id for id in self.show_id_lst if id not in del_id_lst]
+        self.select_id_lst.clear()
 
-    def save(self):
-        conn = sqlite3.connect(self.path)
-        try:
-            cur = conn.cursor()
-            cur.execute(DATAS_SQL_SET)
-            cur.execute(TEXTS_SQL_SET)
-            cur.execute("DELETE FROM datas")
-            cur.execute("DELETE FROM texts")
-            for _, card in self.cards.items():
-                data_row = (
-                    card.id,
-                    card.alias,
-                    card.setcode,
-                    card.type,
-                    card.value,
-                    card.atk,
-                    card.move,
-                    card.race,
-                    card.from_,
-                )
-                cur.execute(
-                    "INSERT INTO datas VALUES (?,?,?,?,?,?,?,?,?)",
-                    data_row,
-                )
-                hints = card.hints
-                if len(hints) < 16:
-                    hints += [""] * (16 - len(hints))
-                else:
-                    hints = hints[:16]
-                text_row = (int(card.id), card.name or "", card.desc or "", *hints)
-                cur.execute(
-                    "INSERT INTO texts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    text_row,
-                )
-
-            conn.commit()
-        finally:
-            conn.close()
+        if self.show_id_lst:
+            new_now_id = self.show_id_lst[0]
+            self.select_id_lst.add(new_now_id)
+        else:
+            new_now_id = 0
+        self.now_id = new_now_id

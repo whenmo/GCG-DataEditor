@@ -1,6 +1,6 @@
 import os
 import re
-from CardInfo import Cardinfo, load_cardinfo
+from ConfigLoader import CardInfo, load_cardinfo
 from DataBase import CDB, Card
 from contextlib import contextmanager
 from PyQt6.QtWidgets import (
@@ -35,7 +35,6 @@ class CdbFileBtn(QWidget):
     fileBtn: QPushButton
     closeBtn: QPushButton
     cdb: CDB
-    card_index: int
     act: QAction
     style_select: str
     style_unselect: str
@@ -63,10 +62,9 @@ class CdbFileBtn(QWidget):
     # 載入 cdb
     def set_cdb(self):
         self.cdb = CDB(self.filepath)
-        self.card_index = self.cdb.get_first_id()
         main = get_main()
         if main:
-            main.dataeditor.set_cdb(self.cdb, self.card_index)
+            main.dataeditor.set_cdb(self.cdb)
         else:
             QTimer.singleShot(0, self._delayed_set_cdb)
 
@@ -78,7 +76,7 @@ class CdbFileBtn(QWidget):
     def _delayed_set_cdb(self):
         main = get_main()
         if main:
-            main.dataeditor.set_cdb(self.cdb, self.card_index)
+            main.dataeditor.set_cdb(self.cdb)
 
     def set_action(self, action: QAction):
         self.act = action
@@ -90,7 +88,7 @@ class CdbFileBtn(QWidget):
             return
         editor = main.dataeditor
         # 載入資料編輯器
-        editor.set_cdb(self.cdb, self.card_index)
+        editor.set_cdb(self.cdb)
         editor.setVisible(True)
         # 設定 toolbar 選中
         try:
@@ -103,7 +101,7 @@ class CdbFileBtn(QWidget):
     def load_file(self):
         main = get_main()
         if main:
-            main.dataeditor.set_cdb(self.cdb, self.card_index)
+            main.dataeditor.set_cdb(self.cdb)
 
     def remove_self(self):
         main = get_main()
@@ -474,6 +472,7 @@ class IDSet(QWidget):
         self.id.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        self.id.returnPressed.connect(self.search_id)
         id_frame.addWidget(self.id)
 
         # 右側 alias
@@ -486,6 +485,15 @@ class IDSet(QWidget):
 
         main_frame.addWidget(id_panel)
         frame.addWidget(self)
+
+    # 搜索 ID 開頭的卡
+    def search_id(self):
+        id = self.id.text()
+        if not re.fullmatch(r"[0-9]+", id):
+            id = ""
+        main = get_main()
+        main.dataeditor.card_list.search_id(id)
+        main.dataeditor.updata()
 
     # 根據 card 設定卡片ID
     def load_card(self, card: Card):
@@ -563,7 +571,7 @@ class TypeSet(QWidget):
     sub: QComboBox
     sub_data: dict[str, tuple[str, dict[str, str], str]]
 
-    def __init__(self, info: Cardinfo, frame: QLayout):
+    def __init__(self, info: CardInfo, frame: QLayout):
         super().__init__()
         self.sub_data = {}
         for key in ["monstyp", "calltyp", "banetyp", "areatyp"]:
@@ -924,27 +932,25 @@ class HintSet(QWidget):
 # ---------- DataEditor item ----------
 # 卡片列表組件
 class CardListSet(QWidget):
-    cdb: CDB | None
+    # 控件
     card_lst: QTableWidget
     prev_btn: QPushButton
     page_text: QLineEdit
     page_label: QLabel
     next_btn: QPushButton
-    id_index: int
+    # 卡片列表屬性
+    cdb: CDB | None
     id_to_row: dict[int, int]
-
+    # 前後頁屬性
     rows_per_page: int = 10  # 默認值，可被自動覆蓋
-    current_page: int = 1
+    now_page: int = 1
     total_page: int = 1
 
     def __init__(self):
         super().__init__()
-        self.id_index = 0
         self.id_to_row = {}
-
-        # 允許接收鍵盤事件
+        self.cdb = None
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
         main_frame = new_frame("V", self)
         # 卡片列表
         self.card_lst = CardTable(main_frame)
@@ -952,80 +958,88 @@ class CardListSet(QWidget):
         # 按鈕控制區
         page_frame: QHBoxLayout = new_frame("H", main_frame)
         page_frame.addStretch()
-
         self.prev_btn = new_btn("上一頁", page_frame, self.prev_page)
-
         self.page_text = QLineEdit("1")
         self.page_text.setStyleSheet("font-size: 12px;")
-        self.page_text.setFixedWidth(40)
         self.page_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.page_text.returnPressed.connect(self.goto_page)
         page_frame.addWidget(self.page_text)
-
         self.page_label = QLabel("/ 1")
         self.page_label.setStyleSheet("font-size: 12px;")
         page_frame.addWidget(self.page_label)
-
         self.next_btn = new_btn("下一頁", page_frame, self.next_page)
-
         page_frame.addStretch()
 
     # ---------------- 內部事件 ----------------
     def showEvent(self, event):
         super().showEvent(event)
         self.calc_rows_per_page()
-        if self.cdb:
-            self.update(self.cdb, self.id_index)
+        self.refresh_view()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh_view()
 
     # 上一頁
     def prev_page(self):
-        if self.current_page > 1:
-            self.current_page -= 1
-            self.update(self.cdb, self.id_index)
+        if self.now_page > 1:
+            self.now_page -= 1
+            self.refresh_view()
 
     # 下一頁
     def next_page(self):
-        if self.current_page < self.total_page:
-            self.current_page += 1
-            self.update(self.cdb, self.id_index)
+        if self.now_page < self.total_page:
+            self.now_page += 1
+            self.refresh_view()
 
     # 跳轉到指定頁
     def goto_page(self):
         try:
             page = int(self.page_text.text())
         except ValueError:
-            page = self.current_page
+            page = self.now_page
         if 1 <= page <= self.total_page:
-            self.current_page = page
-            self.update(self.cdb, self.id_index)
+            self.now_page = page
+            self.refresh_view()
         else:
-            self.page_text.setText(str(self.current_page))
+            self.page_text.setText(str(self.now_page))
 
     # 點擊時事件
     def on_item_clicked(self, item: QTableWidgetItem):
         row = item.row()
         id_item = self.card_lst.item(row, 0)
-        pre_id, self.id_index = self.id_index, int(id_item.text())
+        clicked_id = int(id_item.text())
+        modifiers = QApplication.keyboardModifiers()
+        # ------------------ 處理 Shift 範圍選擇 ------------------
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            pre_id = self.cdb.now_id
+            keys = self.cdb.show_id_lst
+            if keys and pre_id != 0:
+                try:
+                    ind_st = keys.index(pre_id)
+                    ind_ed = keys.index(clicked_id)
+                except ValueError:  # 如果 ID 不在當前列表
+                    ind_st, ind_ed = -1, -1
+                if ind_st != -1:
+                    range_st = min(ind_st, ind_ed)
+                    range_ed = max(ind_st, ind_ed)
+                    self.cdb.select_id_lst.clear()
+                    for i in range(range_st, range_ed + 1):
+                        self.cdb.select_id_lst.add(keys[i])
+        # ------------------ 處理 Ctrl 選擇 ------------------
+        elif modifiers & Qt.KeyboardModifier.ControlModifier:
+            if clicked_id in self.cdb.select_id_lst:
+                if len(self.cdb.select_id_lst) > 1:
+                    self.cdb.select_id_lst.remove(clicked_id)
+            else:
+                self.cdb.select_id_lst.add(clicked_id)
+        # ------------------ 單擊 ------------------
+        else:
+            self.cdb.select_id_lst.clear()
+            self.cdb.select_id_lst.add(clicked_id)
 
-        if pre_id == self.id_index:
-            return
-
-        # 將該行所有列設置背景色
-        for col in range(self.card_lst.columnCount()):
-            cell = self.card_lst.item(row, col)
-            if cell:
-                cell.setBackground(QColor(180, 200, 255))  # 淺藍色
-                cell.setForeground(QColor(0, 0, 0))  # 字體顏色設為黑色
-
-        # 可選：將其他行背景重置
-        prev_row = self.id_to_row.get(pre_id)
-        if prev_row is not None and 0 <= prev_row < self.card_lst.rowCount():
-            for col in range(self.card_lst.columnCount()):
-                cell = self.card_lst.item(prev_row, col)
-                if cell:
-                    cell.setBackground(QBrush())  # 重置為預設背景
-                    cell.setForeground(QBrush())  # 重置為預設字色
-
+        self.cdb.now_id = clicked_id
+        self.refresh_view()
         get_main().dataeditor.updata()
 
     # 處理上下鍵移動 now_ind 到前一個/下一個
@@ -1040,27 +1054,24 @@ class CardListSet(QWidget):
         super().keyPressEvent(event)
 
     def _move_index(self, delta: int):
-        """根據目前 self._cdb 的順序移動 now_ind 並觸發 on_item_clicked。"""
-        if not self.cdb or not self.cdb.cards:
+        """根據目前 self.cdb.show_id_lst 的順序移動 now_ind 並觸發 on_item_clicked。"""
+        if self.cdb is None or not self.cdb.show_id_lst:
             return
-        keys = list(self.cdb.cards.keys())
-        # 嘗試找到目前 now_ind 的索引
+        keys = self.cdb.show_id_lst
         try:
-            cur_idx = keys.index(self.id_index)
+            cur_idx = keys.index(self.cdb.now_id)
         except ValueError:  # 若沒有選擇，從 -1 開始
             cur_idx = -1
-
         new_idx = cur_idx + delta
         if new_idx < 0 or new_idx >= len(keys):
             return  # 超出範圍則不動作
-
         new_page = (new_idx // self.rows_per_page) + 1
         # 目標行在當前頁，直接觸發 on_item_clicked
-        if new_page == self.current_page:
+        if new_page == self.now_page:
             cur_row = new_idx % self.rows_per_page
         else:
-            self.current_page = new_page
-            self.update(self.cdb, self.id_index)
+            self.now_page = new_page
+            self.refresh_view()
             if delta == 1:
                 cur_row = 0
             else:
@@ -1074,76 +1085,110 @@ class CardListSet(QWidget):
         show_row = self.card_lst.viewport().height() // 30
         self.rows_per_page = max(1, show_row)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.cdb:
-            self.update(self.cdb, self.id_index)
-
-    # ---------------- 設定數據 ----------------
-    # 更新卡片列表
-    def update(self, cdb: CDB | None = None, ind: int | None = None):
-        self.cdb = cdb
-        self.card_lst.setRowCount(0)
-        self.id_index = 0 if ind is None else ind
-        if cdb is None:
+    def clear_filter(self):
+        if self.cdb is None:
+            return
+        all_ids = sorted(self.cdb.card_dict.keys(), key=lambda k: int(k))
+        self.cdb.show_id_lst = all_ids
+        if self.cdb.now_id not in self.cdb.show_id_lst and self.cdb.show_id_lst:
+            self.cdb.now_id = self.cdb.show_id_lst[0]
+        try:
+            now_idx = self.cdb.show_id_lst.index(self.cdb.now_id)
+            self.current_page = (now_idx // self.rows_per_page) + 1
+        except ValueError:
             self.current_page = 1
+        self.refresh_view()
+
+    def search_id(self, id: str):
+        if self.cdb is None:
+            return
+        self.cdb.search_id(id)
+        self.now_page = 1
+        self.refresh_view()
+
+    def search_name(self, name: str):
+        if self.cdb is None:
+            return
+        self.cdb.search_name(name)
+        self.now_page = 1
+        self.refresh_view()
+
+    def refresh_view(self):
+        """根據當前的 cdb 和過濾列表刷新 QTableWidget 的內容"""
+        self.card_lst.setRowCount(0)
+        if self.cdb is None:
             self.total_page = 1
-            self.page_text.setText(str(self.current_page))
+            self.page_text.setText(str(self.now_page))
             self.page_label.setText(f"/ {self.total_page}")
             return
 
-        # 計算動態每頁行數
+        keys = self.cdb.show_id_lst if self.cdb else []
         self.calc_rows_per_page()
-
-        # 使用數值排序的 keys（根據 card id 的大小），以確保表格按 ID 大小顯示
-        try:
-            keys = sorted(cdb.cards.keys(), key=lambda k: int(k))
-        except Exception:
-            keys = cdb.cards.keys()
-
-        # 計算總頁數
         self.total_page = max(
             1, (len(keys) + self.rows_per_page - 1) // self.rows_per_page
         )
-        if self.current_page > self.total_page:
-            self.current_page = self.total_page
-
+        # 頁碼校正
+        if self.now_page > self.total_page:
+            self.now_page = self.total_page
         # 更新 page_text 與 page_label
-        self.page_text.setText(str(self.current_page))
+        self.page_text.setText(str(self.now_page))
         self.page_label.setText(f"/ {self.total_page}")
-
         # 計算當前頁的索引範圍
-        start_idx = (self.current_page - 1) * self.rows_per_page
-        end_idx = min(start_idx + self.rows_per_page, len(keys))
-
-        self.card_lst.setRowCount(end_idx - start_idx)
+        st_ind = (self.now_page - 1) * self.rows_per_page
+        ed_ind = min(st_ind + self.rows_per_page, len(keys))
+        self.card_lst.setRowCount(ed_ind - st_ind)
         self.id_to_row.clear()
-
-        for row, key_idx in enumerate(range(start_idx, end_idx)):
+        # 填充表格
+        for row, key_idx in enumerate(range(st_ind, ed_ind)):
             card_id = keys[key_idx]
-            card = cdb.cards[card_id]
+            card = self.cdb.card_dict[card_id]
             self.id_to_row[int(card.id)] = row
-            is_selected = card.id == self.id_index
+            is_selected = card_id in self.cdb.select_id_lst
             for col, txt in enumerate([str(card.id), card.name]):
                 item = QTableWidgetItem(txt)
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                 )
-                if is_selected:
+                if is_selected:  # 使用淺藍色作為選中高亮
                     item.setBackground(QColor(180, 200, 255))
                     item.setForeground(QColor(0, 0, 0))
+                else:  # 重置為預設背景
+                    item.setBackground(QBrush())
+                    item.setForeground(QBrush())
                 self.card_lst.setItem(row, col, item)
+
+    # ---------------- 設定數據 ----------------
+    def set_data_source(self, cdb: CDB | None = None):
+        """設定卡片資料庫 (CDB) 並初始化卡片索引和過濾列表"""
+        self.cdb = cdb
+        if cdb is None:
+            self.now_page = 1
+            return
+        try:
+            now_idx = self.cdb.show_id_lst.index(self.cdb.now_id)
+            self.now_page = (now_idx // self.rows_per_page) + 1
+        except (ValueError, AttributeError):
+            self.now_page = 1
+
+    # 增加卡片
+    def add_card(self, card: Card):
+        if self.cdb:
+            self.cdb.add_card(card)
+            try:
+                now_idx = self.cdb.show_id_lst.index(self.cdb.now_id)
+                self.current_page = (now_idx // self.rows_per_page) + 1
+            except ValueError:
+                self.current_page = 1
+
+            self.refresh_view()
+            get_main().dataeditor.updata()
 
     # ---------------- 獲取數據 ----------------
     # 傳回當前卡片
     def get_now_card(self) -> Card | None:
-        if self.cdb is None or self.id_index == 0:
+        if self.cdb is None or self.cdb.now_id == 0:
             return None
-        return self.cdb.get_card(self.id_index)
-
-    # 增加卡片
-    def add_card(self, card: Card):
-        self.cdb.add_card(card)
+        return self.cdb.get_card(self.cdb.now_id)
 
 
 # 卡片資料組件
@@ -1161,7 +1206,7 @@ class CardDataSet(QWidget):
     def __init__(self, frame: QLayout):
         super().__init__()
         # cardinfo
-        cardinfo: Cardinfo = load_cardinfo()
+        cardinfo: CardInfo = load_cardinfo()
         # id & alias
         self.code = IDSet(frame)
         # 字段
@@ -1249,6 +1294,7 @@ class CardTextSet(QWidget):
         # 卡名
         self.name = QLineEdit()
         self.name.setAlignment(Qt.AlignmentFlag.AlignCenter)  # 文字置中
+        self.name.returnPressed.connect(self.search_name)
         frame.addWidget(self.name)
 
         # 卡圖 & 脚本提示文字
@@ -1276,21 +1322,13 @@ class CardTextSet(QWidget):
         self.gene_desc.setFixedHeight(line_height * 5 + 8)  # 顯示約5行，+8留邊距
         frame.addWidget(self.gene_desc)
 
-    # ---------------- 設定數據 ----------------
-    # 讀取卡片並更新卡片文本
-    def load_card(self, card: Card):
-        self.name.setText(card.name)
-        self.hint.load_card(card)
-        self.image.load_card(card)
-        desc = card.desc
-        gene_desc = ""
-        desc_lst = desc.splitlines()
-        for i, line in enumerate(desc_lst):
-            if line.startswith("【进化元效果】"):
-                desc = "\n".join(desc_lst[:i])
-                gene_desc = "\n".join(desc_lst[i + 1 :])
-        self.desc.setPlainText(desc)
-        self.gene_desc.setPlainText(gene_desc)
+    # ---------------- 內部事件 ----------------
+    # 搜索 name 開頭的卡
+    def search_name(self):
+        name = self.name.text()
+        main = get_main()
+        main.dataeditor.card_list.search_name(name)
+        main.dataeditor.updata()
 
     # 點擊時導入卡圖
     def _on_image_clicked(self):
@@ -1312,6 +1350,22 @@ class CardTextSet(QWidget):
 
         shutil.copyfile(file_path, img_path)
         self.image.set_image(img_path)
+
+    # ---------------- 設定數據 ----------------
+    # 讀取卡片並更新卡片文本
+    def load_card(self, card: Card):
+        self.name.setText(card.name)
+        self.hint.load_card(card)
+        self.image.load_card(card)
+        desc = card.desc
+        gene_desc = ""
+        desc_lst = desc.splitlines()
+        for i, line in enumerate(desc_lst):
+            if line.startswith("【进化元效果】"):
+                desc = "\n".join(desc_lst[:i])
+                gene_desc = "\n".join(desc_lst[i + 1 :])
+        self.desc.setPlainText(desc)
+        self.gene_desc.setPlainText(gene_desc)
 
     # 清空當前內容
     def clear(self):
