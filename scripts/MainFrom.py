@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
 )
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt
 
 
@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.title = "Eternal Field DataEditor"
         self.setWindowTitle(self.title)
         self.resize(850, 650)
+        self.setWindowIcon(QIcon("data/app_icon.png"))
         # 工具列
         main_toolbar = QToolBar("main")
         self.addToolBar(main_toolbar)
