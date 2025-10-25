@@ -1064,9 +1064,9 @@ class CardDataSet(QWidget):
     def load_card(self, card: Card):
         self.code.load_card(card)
         self.typ.load_card(card)
-        self.apply.set_value(card.level)
         self.atk.set_value(card.atk)
-        self.def_.set_value(card.level)
+        self.def_.set_value(card.def_)
+        self.apply.set_value(card.level)
         self.race.set_value(f"0x{card.race:X}")
         self.attribute.set_value(f"0x{card.attribute:X}")
 
@@ -1074,9 +1074,9 @@ class CardDataSet(QWidget):
     def clear(self):
         self.code.clear()
         self.typ.celear()
-        self.apply.set_value(0)
         self.atk.set_value(0)
         self.def_.set_value(0)
+        self.apply.set_value(0)
         self.race.set_value("0x0")
         self.attribute.set_value("0x0")
 

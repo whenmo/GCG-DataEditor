@@ -123,18 +123,15 @@ class DataEditor(QWidget):
             return
         cdb = fb.cdb
         if now_c.id != id:
-            cdb.add_card(self.pack_card_data())  # 直接覆蓋保存
-            main.show_msg("修改成功")
-        else:
             if cdb.has_id(id) and not main.show_quest(f"{id} 已存在, 是否覆盖"):
                 return
             if main.show_quest(f"是否刪除 {now_c.id}"):
                 cdb.del_card(now_c.id)
-            c = self.pack_card_data()
-            cdb.add_card(c)
-            self.card_list.set_data_source(cdb)
-            self.card_list.refresh_view()
-            main.show_msg("修改成功")
+
+        cdb.add_card(self.pack_card_data())
+        self.card_list.set_data_source(cdb)
+        self.card_list.refresh_view()
+        main.show_msg("修改成功")
 
         self.updata()
 
