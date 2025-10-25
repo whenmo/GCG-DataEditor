@@ -86,11 +86,9 @@ class DataEditor(QWidget):
     # 將當前編輯器內容打包成 Card 並返回
     def pack_card_data(self) -> Card:
         id, alias = self.card_data.get_code()
-        data_list = [id, alias, *self.card_data.get_data_list()]
-
-        is_mons = data_list[3] & 0x1 == 0x1
-        text_lst = [id, *self.card_text.get_text_list(is_mons)]
-
+        ot, setcode = 3, 0
+        data_list = [id, ot, alias, setcode, *self.card_data.get_data_list(), 0]
+        text_lst = [id, *self.card_text.get_text_list()]
         c = Card(id)
         c.set_data(data_list)
         c.set_text(text_lst)

@@ -18,9 +18,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import Qt, QDataStream
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from Global import PATH_ICON
-
-APP_ID = "EternalFieldDataEditor"
+from Global import APP_ID, PATH_ICON
 
 
 def new_toolbtn(title: str, toolbar: QToolBar) -> QMenu:
@@ -222,7 +220,7 @@ class MainWindow(QMainWindow):
 
     # github
     def go_github(self):
-        url = "https://github.com/whenmo/Eternal-Field-DataEditor"
+        url = "https://github.com/whenmo/GCG-DataEditor"
         webbrowser.open_new_tab(url)
 
 

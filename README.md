@@ -1,2 +1,2 @@
-# Eternal Field DataEditor
-Manage card database(.cdb file) for [Eternal Field](https://github.com/whenmo/Eternal-Field).
+# Galaxy Card Game DataEditor
+Manage card database(.cdb file) for [Galaxy Card Game](https://github.com/FogMoe/galaxycardgame).

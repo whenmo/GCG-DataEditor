@@ -1,100 +1,66 @@
 import sqlite3
+from Global import get_sql_code_data, get_sql_code_text
 
-DATAS_SQL_SET: str = """
-    CREATE TABLE IF NOT EXISTS datas (
-        id INTEGER PRIMARY KEY,
-        alias INTEGER,
-        setcode INTEGER,
-        type INTEGER,
-        value INTEGER,
-        atk INTEGER,
-        move INTEGER,
-        race INTEGER,
-        [from] INTEGER
-    )
-    """
-
-TEXTS_SQL_SET: str = """
-    CREATE TABLE IF NOT EXISTS texts (
-        id INTEGER PRIMARY KEY,
-        name TEXT,
-        desc TEXT,
-        hint1 TEXT,
-        hint2 TEXT,
-        hint3 TEXT,
-        hint4 TEXT,
-        hint5 TEXT,
-        hint6 TEXT,
-        hint7 TEXT,
-        hint8 TEXT,
-        hint9 TEXT,
-        hint10 TEXT,
-        hint11 TEXT,
-        hint12 TEXT,
-        hint13 TEXT,
-        hint14 TEXT,
-        hint15 TEXT,
-        hint16 TEXT
-    )
-    """
+sql_set_datas, sql_insert_datas = get_sql_code_data()
+sql_set_texts, sql_insert_texts = get_sql_code_text()
 
 
-# 建立新的 CDB 資料庫檔案，包含 datas 與 texts 兩個表
+# 建立新的 CDB 資料庫檔案, 包含 datas 與 texts 兩個表
 def creat_new_cdb(file_path: str):
     conn = sqlite3.connect(file_path)
     cursor = conn.cursor()
     # 建立 data & texts 表
-    cursor.execute(DATAS_SQL_SET)
-    cursor.execute(TEXTS_SQL_SET)
+    cursor.execute(sql_set_datas)
+    cursor.execute(sql_set_texts)
     conn.commit()
     conn.close()
 
 
 class Card:
     id: int
+    ot: int
     alias: int
     setcode: int
     type: int
-    value: int
     atk: int
-    move: int
+    def_: int
+    level: int
     race: int
-    from_: int
+    attribute: int
+    category: int
     name: str
     desc: str
-    hints: list[str]
+    strs: list[str]
 
     def __init__(self, id: int):
         self.id = id
+        self.ot = 3
         self.alias = 0
         self.setcode = 0
         self.type = 0
-        self.value = 0
         self.atk = 0
-        self.move = 0
+        self.def_ = 0
+        self.level = 0
         self.race = 0
-        self.from_ = 0
+        self.attribute = 0
+        self.category = 0
         self.name = ""
         self.desc = ""
-        self.hints = []
-
-    def set_id(self, id: int):
-        self.id = id
+        self.strs = []
 
     def set_data(self, data: list[int]):
-        self.alias = data[1]
-        self.setcode = data[2]
-        self.type = data[3]
-        self.value = data[4]
+        self.alias = data[2]
+        self.type = data[4]
         self.atk = data[5]
-        self.move = data[6]
-        self.race = data[7]
-        self.from_ = data[8]
+        self.def_ = data[6]
+        self.level = data[7]
+        self.race = data[8]
+        self.attribute = data[9]
 
     def set_text(self, text: list[str]):
         self.name = text[1]
         self.desc = text[2]
-        self.hints = text[3:]
+        self.strs = text[3:]
 
 
 class CDB:
@@ -155,37 +121,33 @@ class CDB:
         try:
             with sqlite3.connect(self.path) as conn:
                 cur = conn.cursor()
-                cur.execute(DATAS_SQL_SET)
-                cur.execute(TEXTS_SQL_SET)
+                cur.execute(sql_set_datas)
+                cur.execute(sql_set_texts)
                 cur.execute("DELETE FROM datas")
                 cur.execute("DELETE FROM texts")
                 sorted_cards = sorted(self.card_dict.values(), key=lambda card: card.id)
                 for card in sorted_cards:
                     data_row = (
                         card.id,
+                        card.ot,
                         card.alias,
                         card.setcode,
                         card.type,
-                        card.value,
                         card.atk,
-                        card.move,
+                        card.def_,
+                        card.level,
                         card.race,
-                        card.from_,
+                        card.attribute,
+                        card.category,
                     )
-                    cur.execute(
-                        "INSERT INTO datas VALUES (?,?,?,?,?,?,?,?,?)",
-                        data_row,
-                    )
-                    hints = card.hints
+                    cur.execute(sql_insert_datas, data_row)
+                    hints = card.strs
                     if len(hints) < 16:
                         hints += [""] * (16 - len(hints))
                     else:
                         hints = hints[:16]
                     text_row = (int(card.id), card.name or "", card.desc or "", *hints)
-                    cur.execute(
-                        "INSERT INTO texts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        text_row,
-                    )
+                    cur.execute(sql_insert_texts, text_row)
 
                 conn.commit()
         except Exception:
